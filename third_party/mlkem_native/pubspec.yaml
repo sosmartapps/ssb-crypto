@@ -1,0 +1,19 @@
+name: mlkem_native
+description: "MLKEM native usage of lib"
+version: 1.0.4+ssb.1
+publish_to: none
+homepage: https://github.com/rkz-app/mlkem_native_port
+main: https://github.com/rkz-app/mlkem_native_port/blob/main/README.md
+
+
+
+environment:
+  sdk: ^3.11.1
+
+dependencies:
+  code_assets: ^1.0.0
+  ffi: ^2.2.0
+  hooks: ^1.0.0
+  logging: ^1.3.0
+  native_toolchain_c: ^0.17.4
+

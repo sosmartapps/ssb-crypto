@@ -1,0 +1,21 @@
+name: ssb_crypto
+description: So Smart Beneficiary zero-knowledge, hybrid post-quantum crypto core.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.11.1
+
+dependencies:
+  cryptography: 2.9.0
+  pointycastle: 4.0.0
+  mlkem_native:
+    path: ../../third_party/mlkem_native
+  mldsa_native:
+    path: ../../third_party/mldsa_native
+  pqcrypto: 0.4.1 # pure-Dart PQ backend for the web survivor portal
+  unorm_dart: 0.3.2 # pure-Dart Unicode normalization (NFKD for passphrases, see unlock.dart)
+
+dev_dependencies:
+  test: ^1.28.0
+  lints: ^6.0.0

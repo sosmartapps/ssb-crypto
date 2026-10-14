@@ -1,0 +1,85 @@
+import 'dart:typed_data';
+
+import 'package:cryptography/cryptography.dart';
+
+import 'bytes.dart';
+import 'suite.dart';
+
+/// Chunked file encryption (spec §6.2): the STREAM construction
+/// (Hoang, Reyhanitabar, Rogaway, Vizár), as used by age and Tink.
+///
+/// Each 64 KiB chunk is sealed with AES-256-GCM under
+///   nonce = prefix(7) || counter(4, big-endian) || lastFlag(1)
+/// and AAD = header || caller context. This detects truncation (missing
+/// final chunk), extension (data after the final chunk), reordering and
+/// chunk swapping between files.
+///
+/// Layout: header(6) | prefix(7) | chunkSize(4) | chunk0 | chunk1 | ...
+/// where every chunk is ciphertext(<= chunkSize) || tag(16).
+abstract final class StreamCipher {
+  static const defaultChunkSize = 64 * 1024;
+  static const _prefixLen = 7, _tag = 16;
+  static final _gcm = AesGcm.with256bits();
+
+  static Future<Uint8List> encrypt(Uint8List fileKey, Uint8List data,
+      {List<int> context = const [], int chunkSize = defaultChunkSize}) async {
+    if (fileKey.length != 32 || chunkSize < 1) throw const SsbCryptoException('bad input');
+    final header = buildHeader(ObjectType.fileStream);
+    final prefix = randomBytes(_prefixLen);
+    final head = concatBytes([header, prefix, u32be(chunkSize)]);
+    final aad = concatBytes([head, context]);
+    final out = BytesBuilder(copy: false)..add(head);
+    final chunks = data.isEmpty ? 1 : (data.length + chunkSize - 1) ~/ chunkSize;
+    for (var i = 0; i < chunks; i++) {
+      final start = i * chunkSize;
+      final end = (start + chunkSize > data.length) ? data.length : start + chunkSize;
+      final box = await _gcm.encrypt(Uint8List.sublistView(data, start, end),
+          secretKey: SecretKeyData(fileKey),
+          nonce: _nonce(prefix, i, i == chunks - 1),
+          aad: aad);
+      out..add(box.cipherText)..add(box.mac.bytes);
+    }
+    return out.toBytes();
+  }
+
+  static Future<Uint8List> decrypt(Uint8List fileKey, Uint8List blob,
+      {List<int> context = const []}) async {
+    const headLen = Suite.headerLength + _prefixLen + 4;
+    if (fileKey.length != 32 || blob.length < headLen + _tag) {
+      throw const SsbCryptoException('decrypt failed');
+    }
+    final head = Uint8List.sublistView(blob, 0, headLen);
+    final expected = buildHeader(ObjectType.fileStream);
+    if (!constantTimeEquals(head.sublist(0, Suite.headerLength), expected)) {
+      throw const SsbCryptoException('decrypt failed');
+    }
+    final prefix = head.sublist(Suite.headerLength, Suite.headerLength + _prefixLen);
+    final cs = ByteData.sublistView(head, Suite.headerLength + _prefixLen).getUint32(0);
+    if (cs < 1 || cs > 16 * 1024 * 1024) throw const SsbCryptoException('decrypt failed');
+    final aad = concatBytes([head, context]);
+    final out = BytesBuilder(copy: false);
+    var off = headLen;
+    for (var i = 0; off < blob.length; i++) {
+      final remaining = blob.length - off;
+      final isLast = remaining <= cs + _tag;
+      final len = isLast ? remaining : cs + _tag;
+      if (len < _tag) throw const SsbCryptoException('decrypt failed');
+      final chunk = Uint8List.sublistView(blob, off, off + len);
+      try {
+        final pt = await _gcm.decrypt(
+            SecretBox(chunk.sublist(0, len - _tag),
+                nonce: _nonce(prefix, i, isLast), mac: Mac(chunk.sublist(len - _tag))),
+            secretKey: SecretKeyData(fileKey),
+            aad: aad);
+        out.add(pt);
+      } on SecretBoxAuthenticationError {
+        throw const SsbCryptoException('decrypt failed');
+      }
+      off += len;
+    }
+    return out.toBytes();
+  }
+
+  static Uint8List _nonce(Uint8List prefix, int counter, bool last) =>
+      concatBytes([prefix, u32be(counter), [last ? 1 : 0]]);
+}
