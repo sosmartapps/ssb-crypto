@@ -29,7 +29,7 @@ flutter test
 
 ## Known limitations (so you do not spend time on them)
 - The crypto is pure Dart today. It is not constant-time and secrets cannot be reliably wiped from memory. Native and hardware-backed primitives are planned.
-- Removing a beneficiary does not yet rotate the tier keys.
+- Backend hardening (claim throttling, a signed audit log) is still in progress; the server is not part of this repository.
 - The server (Firebase) code is not part of this repository.
 
 ## Contact
