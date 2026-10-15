@@ -37,10 +37,21 @@ abstract final class HybridSignature {
 
   static Future<HybridKeyPair> generateKeyPair() async {
     final edSeed = randomBytes(edSkLen);
-    final edKp = await _ed.newKeyPairFromSeed(edSeed);
-    final edPk = (await edKp.extractPublicKey()).bytes;
-    final (dsaPk, dsaSk) = MlDsa65.keyGen(randomBytes(32));
-    return HybridKeyPair(concatBytes([edSeed, dsaSk]), concatBytes([edPk, dsaPk]));
+    final dsaSeed = randomBytes(32);
+    Uint8List? dsaSk;
+    try {
+      final edKp = await _ed.newKeyPairFromSeed(edSeed);
+      final edPk = (await edKp.extractPublicKey()).bytes;
+      final (dsaPk, sk) = MlDsa65.keyGen(dsaSeed);
+      dsaSk = sk;
+      // The returned secretKey is the only copy the caller gets to wipe;
+      // the working buffers it was assembled from are wiped here.
+      return HybridKeyPair(concatBytes([edSeed, dsaSk]), concatBytes([edPk, dsaPk]));
+    } finally {
+      wipe(edSeed);
+      wipe(dsaSeed);
+      wipe(dsaSk);
+    }
   }
 
   static Future<Uint8List> sign(Uint8List secretKey, Uint8List message,
@@ -49,11 +60,19 @@ abstract final class HybridSignature {
       throw const SsbCryptoException('bad signing key');
     }
     final m = _domain(purpose, message);
-    final edKp = await _ed.newKeyPairFromSeed(Uint8List.sublistView(secretKey, 0, edSkLen));
-    final edSig = await _ed.sign(m, keyPair: edKp);
-    final dsaSig = MlDsa65.sign(Uint8List.fromList(Uint8List.sublistView(secretKey, edSkLen)), m);
-    if (dsaSig.length != dsaSigLen) throw const SsbCryptoException('sign failed');
-    return concatBytes([edSig.bytes, dsaSig]);
+    // Snapshot the key halves before the first await (see Aead.seal).
+    final edSeed = Uint8List.fromList(Uint8List.sublistView(secretKey, 0, edSkLen));
+    final dsaSk = Uint8List.fromList(Uint8List.sublistView(secretKey, edSkLen));
+    try {
+      final edKp = await _ed.newKeyPairFromSeed(edSeed);
+      final edSig = await _ed.sign(m, keyPair: edKp);
+      final dsaSig = MlDsa65.sign(dsaSk, m);
+      if (dsaSig.length != dsaSigLen) throw const SsbCryptoException('sign failed');
+      return concatBytes([edSig.bytes, dsaSig]);
+    } finally {
+      wipe(edSeed);
+      wipe(dsaSk);
+    }
   }
 
   /// Verifies BOTH signatures. A forgery of either algorithm alone fails.

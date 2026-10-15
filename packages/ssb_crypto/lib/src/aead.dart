@@ -36,13 +36,27 @@ abstract final class Aead {
     }
     final header = buildHeader(type);
     final n = nonce ?? randomBytes(nonceLength);
-    final box = await _gcm.encrypt(
-      plaintext,
-      secretKey: SecretKeyData(key),
-      nonce: n,
-      aad: concatBytes([header, context]),
-    );
-    return concatBytes([header, n, box.cipherText, box.mac.bytes]);
+    // Snapshot every input BEFORE the first await. An async body runs
+    // synchronously only up to its first await; a caller that wipes or
+    // rotates its buffer while this call is pending (rotateTier()/dispose()
+    // during an in-flight wrap, report SSB-2026-001) must not be able to
+    // turn the sealed value into zeros without an error. The copies are
+    // wiped as soon as the cipher is done with them.
+    final k = Uint8List.fromList(key);
+    final p = Uint8List.fromList(plaintext);
+    final aad = concatBytes([header, context]);
+    try {
+      final box = await _gcm.encrypt(
+        p,
+        secretKey: SecretKeyData(k),
+        nonce: n,
+        aad: aad,
+      );
+      return concatBytes([header, n, box.cipherText, box.mac.bytes]);
+    } finally {
+      wipe(k);
+      wipe(p);
+    }
   }
 
   static Future<Uint8List> open(
@@ -65,19 +79,31 @@ abstract final class Aead {
     final ct = Uint8List.sublistView(
         blob, Suite.headerLength + nonceLength, blob.length - tagLength);
     final tag = Uint8List.sublistView(blob, blob.length - tagLength);
+    // Key snapshot for the same reason as in [seal]. The ciphertext is not
+    // copied: a caller mutating it mid-flight can only make authentication
+    // fail, never make it succeed on different bytes.
+    final k = Uint8List.fromList(key);
+    final aad = concatBytes([header, context]);
     try {
       final pt = await _gcm.decrypt(
         SecretBox(ct, nonce: nonce, mac: Mac(tag)),
-        secretKey: SecretKeyData(key),
-        aad: concatBytes([header, context]),
+        secretKey: SecretKeyData(k),
+        aad: aad,
       );
       return Uint8List.fromList(pt);
     } on SecretBoxAuthenticationError {
       throw const SsbCryptoException('decrypt failed');
+    } finally {
+      wipe(k);
     }
   }
 
   static void _checkKey(Uint8List key) {
     if (key.length != keyLength) throw const SsbCryptoException('bad key');
+    // Tripwire: a real 256-bit key is all zeros with probability 2^-256.
+    // The only way one shows up here is a buffer that was wiped before (or
+    // while) it was used, so fail loudly instead of sealing under a public
+    // key (report SSB-2026-001 and its follow-up audit).
+    if (isAllZero(key)) throw const SsbCryptoException('bad key');
   }
 }

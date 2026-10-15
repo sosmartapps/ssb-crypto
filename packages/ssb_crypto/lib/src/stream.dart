@@ -18,34 +18,49 @@ import 'suite.dart';
 /// where every chunk is ciphertext(<= chunkSize) || tag(16).
 abstract final class StreamCipher {
   static const defaultChunkSize = 64 * 1024;
+  static const maxChunkSize = 16 * 1024 * 1024;
   static const _prefixLen = 7, _tag = 16;
   static final _gcm = AesGcm.with256bits();
 
   static Future<Uint8List> encrypt(Uint8List fileKey, Uint8List data,
       {List<int> context = const [], int chunkSize = defaultChunkSize}) async {
-    if (fileKey.length != 32 || chunkSize < 1) throw const SsbCryptoException('bad input');
+    // chunkSize ceiling matches what [decrypt] accepts, so encrypt can never
+    // produce a blob its own decrypt rejects. Zero-key tripwire: see
+    // Aead._checkKey.
+    if (fileKey.length != 32 || isAllZero(fileKey) || chunkSize < 1 || chunkSize > maxChunkSize) {
+      throw const SsbCryptoException('bad input');
+    }
     final header = buildHeader(ObjectType.fileStream);
     final prefix = randomBytes(_prefixLen);
     final head = concatBytes([header, prefix, u32be(chunkSize)]);
     final aad = concatBytes([head, context]);
+    // Key snapshot before the first await (see Aead.seal). [data] is NOT
+    // copied -- files can be large -- so callers must keep it intact until
+    // this future completes; ItemCrypto.sealFile passes a private padded
+    // copy, so nothing outside this package can reach that buffer.
+    final k = Uint8List.fromList(fileKey);
     final out = BytesBuilder(copy: false)..add(head);
     final chunks = data.isEmpty ? 1 : (data.length + chunkSize - 1) ~/ chunkSize;
-    for (var i = 0; i < chunks; i++) {
-      final start = i * chunkSize;
-      final end = (start + chunkSize > data.length) ? data.length : start + chunkSize;
-      final box = await _gcm.encrypt(Uint8List.sublistView(data, start, end),
-          secretKey: SecretKeyData(fileKey),
-          nonce: _nonce(prefix, i, i == chunks - 1),
-          aad: aad);
-      out..add(box.cipherText)..add(box.mac.bytes);
+    try {
+      for (var i = 0; i < chunks; i++) {
+        final start = i * chunkSize;
+        final end = (start + chunkSize > data.length) ? data.length : start + chunkSize;
+        final box = await _gcm.encrypt(Uint8List.sublistView(data, start, end),
+            secretKey: SecretKeyData(k),
+            nonce: _nonce(prefix, i, i == chunks - 1),
+            aad: aad);
+        out..add(box.cipherText)..add(box.mac.bytes);
+      }
+      return out.toBytes();
+    } finally {
+      wipe(k);
     }
-    return out.toBytes();
   }
 
   static Future<Uint8List> decrypt(Uint8List fileKey, Uint8List blob,
       {List<int> context = const []}) async {
     const headLen = Suite.headerLength + _prefixLen + 4;
-    if (fileKey.length != 32 || blob.length < headLen + _tag) {
+    if (fileKey.length != 32 || isAllZero(fileKey) || blob.length < headLen + _tag) {
       throw const SsbCryptoException('decrypt failed');
     }
     final head = Uint8List.sublistView(blob, 0, headLen);
@@ -55,29 +70,34 @@ abstract final class StreamCipher {
     }
     final prefix = head.sublist(Suite.headerLength, Suite.headerLength + _prefixLen);
     final cs = ByteData.sublistView(head, Suite.headerLength + _prefixLen).getUint32(0);
-    if (cs < 1 || cs > 16 * 1024 * 1024) throw const SsbCryptoException('decrypt failed');
+    if (cs < 1 || cs > maxChunkSize) throw const SsbCryptoException('decrypt failed');
     final aad = concatBytes([head, context]);
+    final k = Uint8List.fromList(fileKey);
     final out = BytesBuilder(copy: false);
     var off = headLen;
-    for (var i = 0; off < blob.length; i++) {
-      final remaining = blob.length - off;
-      final isLast = remaining <= cs + _tag;
-      final len = isLast ? remaining : cs + _tag;
-      if (len < _tag) throw const SsbCryptoException('decrypt failed');
-      final chunk = Uint8List.sublistView(blob, off, off + len);
-      try {
-        final pt = await _gcm.decrypt(
-            SecretBox(chunk.sublist(0, len - _tag),
-                nonce: _nonce(prefix, i, isLast), mac: Mac(chunk.sublist(len - _tag))),
-            secretKey: SecretKeyData(fileKey),
-            aad: aad);
-        out.add(pt);
-      } on SecretBoxAuthenticationError {
-        throw const SsbCryptoException('decrypt failed');
+    try {
+      for (var i = 0; off < blob.length; i++) {
+        final remaining = blob.length - off;
+        final isLast = remaining <= cs + _tag;
+        final len = isLast ? remaining : cs + _tag;
+        if (len < _tag) throw const SsbCryptoException('decrypt failed');
+        final chunk = Uint8List.sublistView(blob, off, off + len);
+        try {
+          final pt = await _gcm.decrypt(
+              SecretBox(chunk.sublist(0, len - _tag),
+                  nonce: _nonce(prefix, i, isLast), mac: Mac(chunk.sublist(len - _tag))),
+              secretKey: SecretKeyData(k),
+              aad: aad);
+          out.add(pt);
+        } on SecretBoxAuthenticationError {
+          throw const SsbCryptoException('decrypt failed');
+        }
+        off += len;
       }
-      off += len;
+      return out.toBytes();
+    } finally {
+      wipe(k);
     }
-    return out.toBytes();
   }
 
   static Uint8List _nonce(Uint8List prefix, int counter, bool last) =>

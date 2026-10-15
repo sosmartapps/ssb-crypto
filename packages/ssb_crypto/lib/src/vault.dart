@@ -22,8 +22,26 @@ enum Tier { ice, essentials, secrets }
 class VaultKeyring {
   final String vaultId;
   final Uint8List vaultKey;
+
+  /// Raw key map. Prefer [tierKey], which refuses to hand out a wiped key.
   final Map<Tier, Uint8List> tierKeys;
+  bool _disposed = false;
   VaultKeyring._(this.vaultId, this.vaultKey, this.tierKeys);
+
+  /// True once [dispose] has run. Every key-using method throws after that,
+  /// so a keyring that was locked mid-operation can never seal, wrap or
+  /// split under the zeroed buffers it now holds.
+  bool get isDisposed => _disposed;
+
+  /// The live key for [t]. Throws [SsbCryptoException] once disposed.
+  Uint8List tierKey(Tier t) {
+    _checkLive();
+    return tierKeys[t]!;
+  }
+
+  void _checkLive() {
+    if (_disposed) throw const SsbCryptoException('keyring disposed');
+  }
 
   static const recoveryKeyLabel = 'SSB1-RK';
 
@@ -37,13 +55,26 @@ class VaultKeyring {
   List<int> _ctx(String what) => utf8Bytes('ssb/v1/$what|vault:$vaultId');
 
   /// Vault Key wrapped under a 32-byte unlock or recovery key.
-  Future<Uint8List> wrapVaultKey(Uint8List kek, {required String slot}) =>
-      Aead.seal(kek, vaultKey, type: ObjectType.wrappedKey, context: _ctx('vk/$slot'));
+  ///
+  /// Safe to race with [rotateTier] / [dispose]: [Aead.seal] snapshots its
+  /// inputs before its first await, so a wipe that lands while this future
+  /// is pending cannot change what gets sealed (report SSB-2026-001).
+  Future<Uint8List> wrapVaultKey(Uint8List kek, {required String slot}) {
+    _checkLive();
+    return Aead.seal(kek, vaultKey, type: ObjectType.wrappedKey, context: _ctx('vk/$slot'));
+  }
 
-  Future<Uint8List> wrapTierKey(Tier t) => Aead.seal(vaultKey, tierKeys[t]!,
-      type: ObjectType.wrappedKey, context: _ctx('tk/${t.name}'));
+  /// See [wrapVaultKey] for the concurrency guarantee.
+  Future<Uint8List> wrapTierKey(Tier t) {
+    _checkLive();
+    return Aead.seal(vaultKey, tierKeys[t]!,
+        type: ObjectType.wrappedKey, context: _ctx('tk/${t.name}'));
+  }
 
   /// Re-opens a keyring from its stored wrapped keys.
+  ///
+  /// Fails closed: if any wrapped key is rejected, every key already
+  /// unwrapped (the Vault Key included) is wiped before the error leaves.
   static Future<VaultKeyring> open({
     required String vaultId,
     required Uint8List kek,
@@ -55,9 +86,15 @@ class VaultKeyring {
     final vk = await Aead.open(kek, wrappedVaultKey,
         type: ObjectType.wrappedKey, context: ctx('vk/$slot'));
     final tks = <Tier, Uint8List>{};
-    for (final e in wrappedTierKeys.entries) {
-      tks[e.key] = await Aead.open(vk, e.value,
-          type: ObjectType.wrappedKey, context: ctx('tk/${e.key.name}'));
+    try {
+      for (final e in wrappedTierKeys.entries) {
+        tks[e.key] = await Aead.open(vk, e.value,
+            type: ObjectType.wrappedKey, context: ctx('tk/${e.key.name}'));
+      }
+    } catch (_) {
+      wipe(vk);
+      tks.values.forEach(wipe);
+      rethrow;
     }
     return VaultKeyring._(vaultId, vk, tks);
   }
@@ -67,28 +104,48 @@ class VaultKeyring {
   /// For biometric unlock, where the device keystore hands back the Vault Key
   /// after the OS has checked a face or fingerprint. The passphrase path is
   /// still the only way to DERIVE this key; this only re-opens it.
+  ///
+  /// [vaultKey] is copied: the keyring owns its own buffer, so [dispose]
+  /// never zeroes a buffer the caller still holds and the caller's wipe
+  /// never zeroes the keyring. The caller should wipe its copy once done.
   static Future<VaultKeyring> fromVaultKey({
     required String vaultId,
     required Uint8List vaultKey,
     required Map<Tier, Uint8List> wrappedTierKeys,
   }) async {
+    final vk = Uint8List.fromList(vaultKey);
     final tks = <Tier, Uint8List>{};
-    for (final e in wrappedTierKeys.entries) {
-      tks[e.key] = await Aead.open(vaultKey, e.value,
-          type: ObjectType.wrappedKey,
-          context: utf8Bytes('ssb/v1/tk/${e.key.name}|vault:$vaultId'));
+    try {
+      for (final e in wrappedTierKeys.entries) {
+        tks[e.key] = await Aead.open(vk, e.value,
+            type: ObjectType.wrappedKey,
+            context: utf8Bytes('ssb/v1/tk/${e.key.name}|vault:$vaultId'));
+      }
+    } catch (_) {
+      wipe(vk);
+      tks.values.forEach(wipe);
+      rethrow;
     }
-    return VaultKeyring._(vaultId, vaultKey, tks);
+    return VaultKeyring._(vaultId, vk, tks);
   }
 
   /// Rotate one tier (e.g. after removing a beneficiary). Items in that tier
   /// must be re-wrapped with [ItemCrypto.rewrapItemKey].
+  ///
+  /// The old key buffer is wiped in place. A [wrapTierKey] call that is
+  /// still pending for this tier keeps sealing the OLD key (it took its own
+  /// snapshot), which is the value the caller asked for at the time.
   void rotateTier(Tier t) {
+    _checkLive();
     wipe(tierKeys[t]);
     tierKeys[t] = randomBytes(32);
   }
 
+  /// Wipes every key in place and marks the keyring dead. Pending seals that
+  /// were started before this call still complete with the values they were
+  /// given; nothing started after it can use this keyring ([isDisposed]).
   void dispose() {
+    _disposed = true;
     wipe(vaultKey);
     tierKeys.values.forEach(wipe);
   }
@@ -120,16 +177,20 @@ abstract final class ItemCrypto {
     required String itemId,
     required Uint8List plaintext,
   }) async {
+    // Pad (= copy) the plaintext before the first await, so the caller's
+    // buffer is never read after this function has yielded (see Aead.seal).
+    final padded = _pad(plaintext);
     final ik = randomBytes(32);
     try {
       return SealedItem(
         itemId,
         tier,
         await Aead.seal(tierKey, ik, type: ObjectType.wrappedKey, context: _keyCtx(vaultId, tier, itemId)),
-        await Aead.seal(ik, _pad(plaintext), type: ObjectType.item, context: _bodyCtx(vaultId, itemId)),
+        await Aead.seal(ik, padded, type: ObjectType.item, context: _bodyCtx(vaultId, itemId)),
       );
     } finally {
       wipe(ik);
+      wipe(padded);
     }
   }
 
@@ -157,14 +218,24 @@ abstract final class ItemCrypto {
     required Tier newTier,
     required Uint8List newTierKey,
   }) async {
-    final ik = await Aead.open(oldTierKey, item.wrappedItemKey,
-        type: ObjectType.wrappedKey, context: _keyCtx(vaultId, item.tier, item.itemId));
+    // newTierKey is only used AFTER the first await (the unwrap), so it is
+    // snapshotted here; a rotation or dispose() landing in between must
+    // not re-wrap the item key under zeros (audit finding F1, 2026-10-15).
+    final nk = Uint8List.fromList(newTierKey);
     try {
-      return SealedItem(item.itemId, newTier,
-          await Aead.seal(newTierKey, ik, type: ObjectType.wrappedKey, context: _keyCtx(vaultId, newTier, item.itemId)),
-          item.body);
+      final ik = await Aead.open(oldTierKey, item.wrappedItemKey,
+          type: ObjectType.wrappedKey, context: _keyCtx(vaultId, item.tier, item.itemId));
+      try {
+        // The body is copied so the new item never aliases the old one:
+        // wiping or dropping the old SealedItem must not touch the new one.
+        return SealedItem(item.itemId, newTier,
+            await Aead.seal(nk, ik, type: ObjectType.wrappedKey, context: _keyCtx(vaultId, newTier, item.itemId)),
+            Uint8List.fromList(item.body));
+      } finally {
+        wipe(ik);
+      }
     } finally {
-      wipe(ik);
+      wipe(nk);
     }
   }
 
@@ -176,14 +247,18 @@ abstract final class ItemCrypto {
     required String fileId,
     required Uint8List data,
   }) async {
+    // Pad (= copy) before the first await; the padded buffer is private to
+    // this call, which is what StreamCipher.encrypt relies on.
+    final padded = _pad(data);
     final fk = randomBytes(32);
     try {
       return (
         await Aead.seal(tierKey, fk, type: ObjectType.wrappedKey, context: _keyCtx(vaultId, tier, fileId)),
-        await StreamCipher.encrypt(fk, _pad(data), context: _bodyCtx(vaultId, fileId)),
+        await StreamCipher.encrypt(fk, padded, context: _bodyCtx(vaultId, fileId)),
       );
     } finally {
       wipe(fk);
+      wipe(padded);
     }
   }
 

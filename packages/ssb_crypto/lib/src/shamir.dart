@@ -33,6 +33,9 @@ class Share {
     return Share(b[1], b[2], Uint8List.fromList(b.sublist(3, 11)),
         Uint8List.fromList(b.sublist(11)));
   }
+
+  /// Wipes the share's y-values (the secret-bearing part) in place.
+  void erase() => wipe(y);
 }
 
 /// Shamir secret sharing over GF(2^8) (AES polynomial x^8+x^4+x^3+x+1).
@@ -54,24 +57,32 @@ abstract final class Shamir {
         secret.length < minSecretLength) {
       throw const SsbCryptoException('bad shamir parameters');
     }
-    final check = await _keyCheck(secret);
-    final ys = List.generate(shares, (_) => Uint8List(secret.length));
-    for (var i = 0; i < secret.length; i++) {
-      // Fresh random coefficients per byte: f(x) = s + c1 x + ... + c(k-1) x^(k-1)
-      final c = randomBytes(threshold - 1);
-      for (var s = 0; s < shares; s++) {
-        final x = s + 1;
-        var acc = 0;
-        for (var j = c.length - 1; j >= 0; j--) {
-          acc = _mul(acc ^ c[j], x);
+    // Snapshot before the first await (see Aead.seal): a wipe of the
+    // caller's buffer mid-flight must not produce consistent-looking shares
+    // of a zero secret.
+    final sec = Uint8List.fromList(secret);
+    try {
+      final check = await _keyCheck(sec);
+      final ys = List.generate(shares, (_) => Uint8List(sec.length));
+      for (var i = 0; i < sec.length; i++) {
+        // Fresh random coefficients per byte: f(x) = s + c1 x + ... + c(k-1) x^(k-1)
+        final c = randomBytes(threshold - 1);
+        for (var s = 0; s < shares; s++) {
+          final x = s + 1;
+          var acc = 0;
+          for (var j = c.length - 1; j >= 0; j--) {
+            acc = _mul(acc ^ c[j], x);
+          }
+          ys[s][i] = acc ^ sec[i];
         }
-        ys[s][i] = acc ^ secret[i];
+        wipe(c);
       }
-      wipe(c);
+      return [
+        for (var s = 0; s < shares; s++) Share(threshold, s + 1, check, ys[s])
+      ];
+    } finally {
+      wipe(sec);
     }
-    return [
-      for (var s = 0; s < shares; s++) Share(threshold, s + 1, check, ys[s])
-    ];
   }
 
   static Future<Uint8List> combine(List<Share> shares) async {

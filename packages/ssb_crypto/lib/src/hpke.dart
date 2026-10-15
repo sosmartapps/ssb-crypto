@@ -24,14 +24,31 @@ abstract final class Hpke {
   /// Seal [plaintext] to [recipientPublicKey]. Returns enc(1120) || ciphertext.
   static Future<Uint8List> seal(Uint8List recipientPublicKey, Uint8List plaintext,
       {List<int> info = const [], List<int> aad = const []}) async {
-    final e = await XWing.encapsulate(recipientPublicKey);
-    final ks = await keySchedule(e.sharedSecret, info,
-        kemId: kemXWing, kdfId: kdfHkdfSha256, aeadId: aeadAes256Gcm);
-    wipe(e.sharedSecret);
-    final box = await _gcm.encrypt(plaintext,
-        secretKey: SecretKeyData(ks.key), nonce: ks.baseNonce, aad: aad);
-    wipe(ks.key);
-    return concatBytes([e.ciphertext, box.cipherText, box.mac.bytes]);
+    // Snapshot every caller-owned input before the first await (see
+    // Aead.seal). encapsulate() and keySchedule() both await before the
+    // plaintext is touched.
+    final p = Uint8List.fromList(plaintext);
+    final inf = Uint8List.fromList(info);
+    final ad = Uint8List.fromList(aad);
+    try {
+      final e = await XWing.encapsulate(recipientPublicKey);
+      final HpkeKeySchedule ks;
+      try {
+        ks = await keySchedule(e.sharedSecret, inf,
+            kemId: kemXWing, kdfId: kdfHkdfSha256, aeadId: aeadAes256Gcm);
+      } finally {
+        wipe(e.sharedSecret);
+      }
+      try {
+        final box = await _gcm.encrypt(p,
+            secretKey: SecretKeyData(ks.key), nonce: ks.baseNonce, aad: ad);
+        return concatBytes([e.ciphertext, box.cipherText, box.mac.bytes]);
+      } finally {
+        ks.erase();
+      }
+    } finally {
+      wipe(p);
+    }
   }
 
   static Future<Uint8List> open(Uint8List recipientSecretKey, Uint8List sealed,
@@ -40,22 +57,28 @@ abstract final class Hpke {
       throw const SsbCryptoException('decrypt failed');
     }
     final enc = Uint8List.sublistView(sealed, 0, XWing.ciphertextLength);
+    final inf = Uint8List.fromList(info);
+    final ad = Uint8List.fromList(aad);
     final ss = await XWing.decapsulate(Uint8List.fromList(enc), recipientSecretKey);
-    final ks = await keySchedule(ss, info,
-        kemId: kemXWing, kdfId: kdfHkdfSha256, aeadId: aeadAes256Gcm);
-    wipe(ss);
+    final HpkeKeySchedule ks;
+    try {
+      ks = await keySchedule(ss, inf,
+          kemId: kemXWing, kdfId: kdfHkdfSha256, aeadId: aeadAes256Gcm);
+    } finally {
+      wipe(ss);
+    }
     final body = Uint8List.sublistView(sealed, XWing.ciphertextLength);
     try {
       final pt = await _gcm.decrypt(
           SecretBox(body.sublist(0, body.length - 16),
               nonce: ks.baseNonce, mac: Mac(body.sublist(body.length - 16))),
           secretKey: SecretKeyData(ks.key),
-          aad: aad);
+          aad: ad);
       return Uint8List.fromList(pt);
     } on SecretBoxAuthenticationError {
       throw const SsbCryptoException('decrypt failed');
     } finally {
-      wipe(ks.key);
+      ks.erase();
     }
   }
 
@@ -67,11 +90,14 @@ abstract final class Hpke {
     final infoHash = await _labeledExtract(suiteId, const [], 'info_hash', info);
     final context = concatBytes([[0x00], pskIdHash, infoHash]);
     final secret = await _labeledExtract(suiteId, sharedSecret, 'secret', const []);
-    final key = await _labeledExpand(suiteId, secret, 'key', context, _nk);
-    final nonce = await _labeledExpand(suiteId, secret, 'base_nonce', context, _nn);
-    final exporter = await _labeledExpand(suiteId, secret, 'exp', context, _nh);
-    wipe(secret);
-    return HpkeKeySchedule(key, nonce, exporter, context);
+    try {
+      final key = await _labeledExpand(suiteId, secret, 'key', context, _nk);
+      final nonce = await _labeledExpand(suiteId, secret, 'base_nonce', context, _nn);
+      final exporter = await _labeledExpand(suiteId, secret, 'exp', context, _nh);
+      return HpkeKeySchedule(key, nonce, exporter, context);
+    } finally {
+      wipe(secret);
+    }
   }
 
   static Future<Uint8List> _labeledExtract(
@@ -102,4 +128,11 @@ abstract final class Hpke {
 class HpkeKeySchedule {
   final Uint8List key, baseNonce, exporterSecret, context;
   HpkeKeySchedule(this.key, this.baseNonce, this.exporterSecret, this.context);
+
+  /// Wipes the secret-derived material (key and exporter secret). The base
+  /// nonce and context are public values.
+  void erase() {
+    wipe(key);
+    wipe(exporterSecret);
+  }
 }

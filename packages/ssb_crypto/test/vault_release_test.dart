@@ -59,7 +59,9 @@ void main() {
       ring.rotateTier(Tier.secrets);
       final moved = await ItemCrypto.rewrapItemKey(vaultId: 'v1', item: item,
           oldTierKey: old, newTier: Tier.secrets, newTierKey: ring.tierKeys[Tier.secrets]!);
-      expect(moved.body, same(item.body));
+      // Equal bytes, but never the same buffer (SSB-2026-001 follow-up).
+      expect(moved.body, equals(item.body));
+      expect(identical(moved.body, item.body), isFalse);
       expect(await ItemCrypto.open(vaultId: 'v1', tierKey: ring.tierKeys[Tier.secrets]!, item: moved), b('pw'));
       await expectLater(ItemCrypto.open(vaultId: 'v1', tierKey: old, item: moved), throwsSsb);
     });

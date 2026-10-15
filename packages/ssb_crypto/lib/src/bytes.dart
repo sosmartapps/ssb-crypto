@@ -48,6 +48,16 @@ Uint8List concatBytes(List<List<int>> parts) {
 /// secrets should stay in native memory where possible (see spec §6.4).
 void wipe(Uint8List? b) => b?.fillRange(0, b.length, 0);
 
+/// True when every byte is zero (constant time in the length). Used as a
+/// tripwire for key material that was wiped before it was used.
+bool isAllZero(List<int> b) {
+  var acc = 0;
+  for (final x in b) {
+    acc |= x;
+  }
+  return acc == 0;
+}
+
 Uint8List u16be(int v) => Uint8List.fromList([(v >> 8) & 0xff, v & 0xff]);
 
 Uint8List u32be(int v) => Uint8List.fromList(

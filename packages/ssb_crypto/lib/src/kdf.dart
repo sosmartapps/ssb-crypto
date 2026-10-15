@@ -11,12 +11,20 @@ Future<Uint8List> hkdfSha384({
   required String info,
   int length = 32,
 }) async {
-  final k = await Hkdf(hmac: Hmac.sha384(), outputLength: length).deriveKey(
-    secretKey: SecretKeyData(ikm),
-    nonce: salt,
-    info: utf8Bytes(info),
-  );
-  return Uint8List.fromList(await k.extractBytes());
+  // package:cryptography reads SecretKeyData lazily, after an await, so the
+  // input keying material is copied here before anything can wipe it.
+  final k0 = Uint8List.fromList(ikm);
+  final s0 = Uint8List.fromList(salt);
+  try {
+    final k = await Hkdf(hmac: Hmac.sha384(), outputLength: length).deriveKey(
+      secretKey: SecretKeyData(k0),
+      nonce: s0,
+      info: utf8Bytes(info),
+    );
+    return Uint8List.fromList(await k.extractBytes());
+  } finally {
+    wipe(k0);
+  }
 }
 
 /// Argon2id parameters (RFC 9106). Stored alongside the vault so they can be

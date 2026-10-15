@@ -64,14 +64,28 @@ abstract final class Unlock {
     }
     params.validateForUnlock();
     final pw = utf8Bytes(normalize ? normalizePassphrase(passphrase) : passphrase);
-    final a = await argon2id(pw, accountSalt, params);
-    final b = await hkdfSha384(ikm: secretKey, salt: accountSalt, info: 'ssb/v1/secret-key');
-    final muk = await hkdfSha384(
-        ikm: concatBytes([a, b]), salt: accountSalt, info: 'ssb/v1/unlock-key');
-    wipe(pw);
-    wipe(a);
-    wipe(b);
-    return muk;
+    // Snapshot the Secret Key and salt before the (long) Argon2 await, so a
+    // caller wiping the Secret Key mid-derivation cannot silently turn this
+    // into a passphrase-only key (see Aead.seal).
+    final sk = Uint8List.fromList(secretKey);
+    final salt = Uint8List.fromList(accountSalt);
+    Uint8List? a, b, ikm;
+    try {
+      // The cheap half first, so the Secret Key is consumed before the
+      // slow Argon2 step even starts.
+      b = await hkdfSha384(ikm: sk, salt: salt, info: 'ssb/v1/secret-key');
+      a = await argon2id(pw, salt, params);
+      // The concatenation is the full unlock-key pre-image; it gets the
+      // same wipe as its halves, on every exit path.
+      ikm = concatBytes([a, b]);
+      return await hkdfSha384(ikm: ikm, salt: salt, info: 'ssb/v1/unlock-key');
+    } finally {
+      wipe(pw);
+      wipe(sk);
+      wipe(a);
+      wipe(b);
+      wipe(ikm);
+    }
   }
 
   /// Opens an existing vault: derives the (normalized) Unlock Key and hands

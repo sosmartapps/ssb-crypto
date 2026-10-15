@@ -51,7 +51,15 @@ abstract final class Release {
     required Uint8List tierKey,
     required Uint8List beneficiaryPublicKey,
   }) async {
-    final shares = await Shamir.split(tierKey, shares: 3, threshold: 2);
+    // Shamir.split snapshots the secret itself; the explicit copy here keeps
+    // this function correct even if that ever changes.
+    final tk = Uint8List.fromList(tierKey);
+    final List<Share> shares;
+    try {
+      shares = await Shamir.split(tk, shares: 3, threshold: 2);
+    } finally {
+      wipe(tk);
+    }
     final s1 = shares[0].toBytes(), s2 = shares[1].toBytes(), s3 = shares[2].toBytes();
     try {
       return ReleaseBundle(
@@ -60,9 +68,13 @@ abstract final class Release {
         await KitCode.encode(s3Label, s3),
       );
     } finally {
+      // Both the serialized copies and the Share objects they came from.
       wipe(s1);
       wipe(s2);
       wipe(s3);
+      for (final s in shares) {
+        s.erase();
+      }
     }
   }
 
@@ -75,11 +87,22 @@ abstract final class Release {
     required Uint8List sealedServerShare,
     required Uint8List beneficiarySecretKey,
   }) async {
-    final s1 = Share.fromBytes(
-        await KitCode.decode(s1Label, beneficiaryKitCode, payloadLength: _shareLen));
-    final s2 = Share.fromBytes(await Hpke.open(beneficiarySecretKey, sealedServerShare,
-        info: _info(vaultId, beneficiaryId, tier)));
-    return Shamir.combine([s1, s2]);
+    final raw1 = await KitCode.decode(s1Label, beneficiaryKitCode, payloadLength: _shareLen);
+    Uint8List? raw2;
+    Share? s1, s2;
+    try {
+      s1 = Share.fromBytes(raw1);
+      raw2 = await Hpke.open(beneficiarySecretKey, sealedServerShare,
+          info: _info(vaultId, beneficiaryId, tier));
+      s2 = Share.fromBytes(raw2);
+      return await Shamir.combine([s1, s2]);
+    } finally {
+      // Decoded shares are wiped on every exit, including a failed combine.
+      wipe(raw1);
+      wipe(raw2);
+      s1?.erase();
+      s2?.erase();
+    }
   }
 
   /// Company-gone path: Beneficiary Kit (S1) + attorney kit (S3), fully
@@ -88,10 +111,19 @@ abstract final class Release {
     required String beneficiaryKitCode,
     required String attorneyKitCode,
   }) async {
-    final s1 = Share.fromBytes(
-        await KitCode.decode(s1Label, beneficiaryKitCode, payloadLength: _shareLen));
-    final s3 = Share.fromBytes(
-        await KitCode.decode(s3Label, attorneyKitCode, payloadLength: _shareLen));
-    return Shamir.combine([s1, s3]);
+    final raw1 = await KitCode.decode(s1Label, beneficiaryKitCode, payloadLength: _shareLen);
+    Uint8List? raw3;
+    Share? s1, s3;
+    try {
+      s1 = Share.fromBytes(raw1);
+      raw3 = await KitCode.decode(s3Label, attorneyKitCode, payloadLength: _shareLen);
+      s3 = Share.fromBytes(raw3);
+      return await Shamir.combine([s1, s3]);
+    } finally {
+      wipe(raw1);
+      wipe(raw3);
+      s1?.erase();
+      s3?.erase();
+    }
   }
 }

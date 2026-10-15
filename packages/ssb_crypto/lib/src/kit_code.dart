@@ -16,8 +16,20 @@ abstract final class KitCode {
   static const _alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
   static Future<String> encode(String label, Uint8List payload) async {
-    final check = await _checksum(label, payload);
-    final b32 = _toBase32(concatBytes([payload, check]));
+    // Snapshot before the first await (see Aead.seal), so the checksum and
+    // the printed digits always describe the same bytes.
+    final p = Uint8List.fromList(payload);
+    final Uint8List check;
+    try {
+      check = await _checksum(label, p);
+    } catch (_) {
+      wipe(p);
+      rethrow;
+    }
+    final joined = concatBytes([p, check]);
+    wipe(p);
+    final b32 = _toBase32(joined);
+    wipe(joined);
     final groups = <String>[];
     for (var i = 0; i < b32.length; i += 5) {
       groups.add(b32.substring(i, i + 5 > b32.length ? b32.length : i + 5));

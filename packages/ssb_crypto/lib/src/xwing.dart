@@ -40,10 +40,12 @@ abstract final class XWing {
 
   static Future<XWingKeyPair> generateKeyPairDerand(Uint8List seed) async {
     if (seed.length != secretKeyLength) throw const SsbCryptoException('bad seed');
-    final e = await _expand(seed);
+    // Copy before the first await so the returned secret key and the public
+    // key always come from the same seed bytes (see Aead.seal).
+    final sk = Uint8List.fromList(seed);
+    final e = await _expand(sk);
     try {
-      return XWingKeyPair(
-          Uint8List.fromList(seed), concatBytes([e.pkM, e.pkX]));
+      return XWingKeyPair(sk, concatBytes([e.pkM, e.pkX]));
     } finally {
       e.wipe();
     }

@@ -27,6 +27,9 @@ flutter test
 - The vendored native wrappers and our patches: `third_party/*/SSB_PATCHES.md`
 - Anything where two inputs could be confused for one another (domain separation, encodings)
 
+## Security fixes
+See `docs/SECURITY-FIXES.md` for every bounty finding and what changed (SSB-2026-001: in-flight wrap could seal a zero key; fixed 2026-10-15).
+
 ## Known limitations (so you do not spend time on them)
 - The crypto is pure Dart today. It is not constant-time and secrets cannot be reliably wiped from memory. Native and hardware-backed primitives are planned.
 - Backend hardening (claim throttling, a signed audit log) is still in progress; the server is not part of this repository.
