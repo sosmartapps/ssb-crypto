@@ -6,7 +6,7 @@ do with it, and the commit that fixed it.
 
 ## SSB-2026-001 — in-flight wrap sealed a zero key when the keyring was rotated or disposed (Medium)
 
-- **Reported:** 2026-10-15 by an independent researcher (first report under
+- **Reported:** 2026-10-15 by ATOSAN (first report under
   the bounty). Tested against `69740b2`.
 - **What was wrong:** `VaultKeyring.wrapTierKey()` handed the live tier-key
   buffer to `Aead.seal()`, which awaited before AES-GCM read it. A
