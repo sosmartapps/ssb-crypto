@@ -4,6 +4,19 @@ Findings from the bug bounty (see `../SECURITY.md`) and from our own follow-up
 reviews, newest first. Each entry says what was wrong, what an attacker could
 do with it, and the commit that fixed it.
 
+## Reports reviewed and not accepted
+
+- **2026-10-19, Ibnu (Low): "Hpke.keySchedule omits psk_id_hash from the secret."**
+  Not a vulnerability and not a deviation. RFC 9180 section 5.1 puts
+  `psk_id_hash` in the key-schedule *context*; the *secret* is
+  `LabeledExtract(shared_secret, "secret", psk)` and `psk` is the empty string
+  in base mode, so an empty IKM is correct. We reproduced the official RFC 9180
+  Appendix A.1.1 vector independently: our construction gives the RFC's
+  `base_nonce` and `exporter_secret` exactly, while the proposed change does
+  not. The official vector is now a regression test
+  (`test/hpke_rfc_official_test.dart`). Thank you to Ibnu for the careful
+  review; credited as a participant.
+
 ## SSB-2026-001 — in-flight wrap sealed a zero key when the keyring was rotated or disposed (Medium)
 
 - **Reported:** 2026-10-15 by ATOSAN (first report under
