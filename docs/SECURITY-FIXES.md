@@ -52,6 +52,19 @@ do with it, and the commit that fixed it.
   `HybridSignature.generateKeyPair`, Shamir shares in `Release.*`, HPKE
   `exporterSecret`, the unlock-key pre-image in `Unlock.deriveUnlockKey`, and
   `rewrapItemKey` body aliasing — all now wiped / copied.
+- **Second follow-up (2026-10-20, reported by Ibnu; same root cause as
+  SSB-2026-001):** the note above says every public async function copies its
+  caller-owned buffers before its first `await`, but `ItemCrypto.rewrapItemKey`
+  still read `item.body` *after* its awaits (it goes into the returned item).
+  A delete that wiped the old item's body while a tier-rotation re-wrap was
+  pending therefore got a *successful* re-wrap whose body was the wiped bytes:
+  a permanently corrupted item that only failed at the next open, as a
+  generic decrypt error. `ItemCrypto.open` made the same late read of
+  `item.body` but fails closed. Both now copy the body at entry. The earlier
+  regression tests covered the `newTierKey` snapshot and post-completion
+  aliasing, not this in-flight read. Regression tests:
+  `test/rewrap_body_race_test.dart` (the rewrap and open cases both failed
+  before the fix). Thank you to Ibnu for the careful follow-up review.
 - **App side (not in this repository):** `lock()` no longer wipes keys while
   a vault write is in flight; the write re-checks after every await that its
   keyring is still the live one and aborts without writing otherwise.

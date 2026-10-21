@@ -199,10 +199,15 @@ abstract final class ItemCrypto {
     required Uint8List tierKey,
     required SealedItem item,
   }) async {
+    // item.body is read after the first await below, so it is snapshotted
+    // here: a caller that wipes or replaces the old item's buffer while this
+    // open is pending must not change what gets opened (SSB-2026-001
+    // follow-up, 2026-10-20).
+    final body = Uint8List.fromList(item.body);
     final ik = await Aead.open(tierKey, item.wrappedItemKey,
         type: ObjectType.wrappedKey, context: _keyCtx(vaultId, item.tier, item.itemId));
     try {
-      return _unpad(await Aead.open(ik, item.body,
+      return _unpad(await Aead.open(ik, body,
           type: ObjectType.item, context: _bodyCtx(vaultId, item.itemId)));
     } finally {
       wipe(ik);
@@ -218,6 +223,13 @@ abstract final class ItemCrypto {
     required Tier newTier,
     required Uint8List newTierKey,
   }) async {
+    // item.body is read after the awaits below as well (it goes into the
+    // returned item), so it is snapshotted here too: a delete that wipes the
+    // old item's body while a rotation re-wrap is pending must not turn into
+    // a successful re-wrap of wiped bytes (SSB-2026-001 follow-up,
+    // 2026-10-20). The copy is private to this call, so the new item also
+    // never aliases the old one.
+    final body = Uint8List.fromList(item.body);
     // newTierKey is only used AFTER the first await (the unwrap), so it is
     // snapshotted here; a rotation or dispose() landing in between must
     // not re-wrap the item key under zeros (audit finding F1, 2026-10-15).
@@ -226,11 +238,9 @@ abstract final class ItemCrypto {
       final ik = await Aead.open(oldTierKey, item.wrappedItemKey,
           type: ObjectType.wrappedKey, context: _keyCtx(vaultId, item.tier, item.itemId));
       try {
-        // The body is copied so the new item never aliases the old one:
-        // wiping or dropping the old SealedItem must not touch the new one.
         return SealedItem(item.itemId, newTier,
             await Aead.seal(nk, ik, type: ObjectType.wrappedKey, context: _keyCtx(vaultId, newTier, item.itemId)),
-            Uint8List.fromList(item.body));
+            body);
       } finally {
         wipe(ik);
       }
