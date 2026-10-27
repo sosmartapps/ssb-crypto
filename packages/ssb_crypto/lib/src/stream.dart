@@ -34,18 +34,20 @@ abstract final class StreamCipher {
     final prefix = randomBytes(_prefixLen);
     final head = concatBytes([header, prefix, u32be(chunkSize)]);
     final aad = concatBytes([head, context]);
-    // Key snapshot before the first await (see Aead.seal). [data] is NOT
-    // copied -- files can be large -- so callers must keep it intact until
-    // this future completes; ItemCrypto.sealFile passes a private padded
-    // copy, so nothing outside this package can reach that buffer.
+    // Snapshot the key AND the data before the first await (see Aead.seal).
+    // The data is read chunk by chunk across many awaits, so a caller that
+    // wipes or overwrites it mid-flight would otherwise get a silently
+    // different (or zeroed) stream. The copy costs one extra buffer; it is
+    // wiped when the stream is done.
     final k = Uint8List.fromList(fileKey);
+    final d = Uint8List.fromList(data);
     final out = BytesBuilder(copy: false)..add(head);
-    final chunks = data.isEmpty ? 1 : (data.length + chunkSize - 1) ~/ chunkSize;
+    final chunks = d.isEmpty ? 1 : (d.length + chunkSize - 1) ~/ chunkSize;
     try {
       for (var i = 0; i < chunks; i++) {
         final start = i * chunkSize;
-        final end = (start + chunkSize > data.length) ? data.length : start + chunkSize;
-        final box = await _gcm.encrypt(Uint8List.sublistView(data, start, end),
+        final end = (start + chunkSize > d.length) ? d.length : start + chunkSize;
+        final box = await _gcm.encrypt(Uint8List.sublistView(d, start, end),
             secretKey: SecretKeyData(k),
             nonce: _nonce(prefix, i, i == chunks - 1),
             aad: aad);
@@ -54,6 +56,7 @@ abstract final class StreamCipher {
       return out.toBytes();
     } finally {
       wipe(k);
+      wipe(d);
     }
   }
 
@@ -75,7 +78,9 @@ abstract final class StreamCipher {
     if (fileKey.length != 32 || isAllZero(fileKey) || blob.length < headLen + _tag) {
       throw const SsbCryptoException('decrypt failed');
     }
-    final head = Uint8List.sublistView(blob, 0, headLen);
+    // Snapshot the blob: it is read chunk by chunk across many awaits.
+    final b = Uint8List.fromList(blob);
+    final head = Uint8List.sublistView(b, 0, headLen);
     final expected = buildHeader(ObjectType.fileStream, formatVersion: formatVersion);
     if (!constantTimeEquals(head.sublist(0, Suite.headerLength), expected)) {
       throw const SsbCryptoException('decrypt failed');
@@ -88,12 +93,12 @@ abstract final class StreamCipher {
     final out = BytesBuilder(copy: false);
     var off = headLen;
     try {
-      for (var i = 0; off < blob.length; i++) {
-        final remaining = blob.length - off;
+      for (var i = 0; off < b.length; i++) {
+        final remaining = b.length - off;
         final isLast = remaining <= cs + _tag;
         final len = isLast ? remaining : cs + _tag;
         if (len < _tag) throw const SsbCryptoException('decrypt failed');
-        final chunk = Uint8List.sublistView(blob, off, off + len);
+        final chunk = Uint8List.sublistView(b, off, off + len);
         try {
           final pt = await _gcm.decrypt(
               SecretBox(chunk.sublist(0, len - _tag),

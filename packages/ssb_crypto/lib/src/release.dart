@@ -157,6 +157,10 @@ abstract final class Release {
     required Uint8List beneficiarySecretKey,
     int? serverShareEpoch,
   }) async {
+    // Snapshot the Secret Key and the sealed share before the first await
+    // (see Aead.seal): both are used only after the kit code has been decoded.
+    final sk = Uint8List.fromList(beneficiarySecretKey);
+    final sealed = Uint8List.fromList(sealedServerShare);
     final raw1 = await KitCode.decode(s1Label, beneficiaryKitCode, payloadLength: _shareLen);
     Uint8List? raw2;
     Share? s1, s2;
@@ -165,13 +169,14 @@ abstract final class Release {
       if (serverShareEpoch != null && serverShareEpoch != s1.epoch) {
         throw const SsbCryptoException(olderGeneration);
       }
-      raw2 = await Hpke.open(beneficiarySecretKey, sealedServerShare,
+      raw2 = await Hpke.open(sk, sealed,
           info: s2Info(vaultId, beneficiaryId, tier, epoch: s1.epoch));
       s2 = Share.fromBytes(raw2);
       if (s1.epoch != s2.epoch) throw const SsbCryptoException(olderGeneration);
       return (key: await Shamir.combine([s1, s2]), epoch: s1.epoch);
     } finally {
       // Decoded shares are wiped on every exit, including a failed combine.
+      wipe(sk);
       wipe(raw1);
       wipe(raw2);
       s1?.erase();

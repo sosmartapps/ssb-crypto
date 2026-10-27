@@ -328,22 +328,30 @@ class VaultKeyring {
     required FreshnessAnchor anchor,
   }) async {
     _requireAllTiers(wrappedTierKeys);
+    // Everything below the first await is read AFTER it, so every caller
+    // buffer, map and list that is used later is snapshotted here (see
+    // Aead.seal): the stored wrapped vault key (hashed for the slot check),
+    // the manifest blob, the wrapped tier keys and the item list.
+    final wvk = Uint8List.fromList(wrappedVaultKey);
+    final mblob = Uint8List.fromList(manifestBlob);
+    final tiersSnap = _snapshotTiers(wrappedTierKeys);
+    final itemsSnap = _snapshotItems(items);
     final slotEpoch = slotEpochs[slot];
     if (slotEpoch == null || slotEpoch < 0 || slotEpoch > VaultManifest.maxU32) {
       throw const SsbCryptoException('stale slot');
     }
     final vk = slotEpoch == 0
-        ? await Aead.openLegacyV1(kek, wrappedVaultKey,
+        ? await Aead.openLegacyV1(kek, wvk,
             type: ObjectType.wrappedKey, context: legacyVkContext(vaultId, slot))
-        : await Aead.open(kek, wrappedVaultKey,
+        : await Aead.open(kek, wvk,
             type: ObjectType.wrappedKey, context: vkContext(vaultId, slot, slotEpoch));
     try {
-      final m = await VaultManifest.open(vk, manifestBlob, vaultId: vaultId);
+      final m = await VaultManifest.open(vk, mblob, vaultId: vaultId);
       if (m.slotEpochs[slot] != slotEpoch ||
-          m.slotHashes[slot] != hexEncode(sha256Of(wrappedVaultKey))) {
+          m.slotHashes[slot] != hexEncode(sha256Of(wvk))) {
         throw const SsbCryptoException('stale slot');
       }
-      return await _finishOpen(vaultId, vk, m, wrappedTierKeys, items, anchor);
+      return await _finishOpen(vaultId, vk, m, tiersSnap, itemsSnap, anchor);
     } catch (_) {
       wipe(vk);
       rethrow;
@@ -374,9 +382,12 @@ class VaultKeyring {
     _checkVaultKey(vaultKey);
     _requireAllTiers(wrappedTierKeys);
     final vk = Uint8List.fromList(vaultKey);
+    // The tier map and item list are read after the first await (see open).
+    final tiersSnap = _snapshotTiers(wrappedTierKeys);
+    final itemsSnap = _snapshotItems(items);
     try {
       final m = await VaultManifest.open(vk, manifestBlob, vaultId: vaultId);
-      return await _finishOpen(vaultId, vk, m, wrappedTierKeys, items, anchor);
+      return await _finishOpen(vaultId, vk, m, tiersSnap, itemsSnap, anchor);
     } catch (_) {
       wipe(vk);
       rethrow;
@@ -385,6 +396,16 @@ class VaultKeyring {
 
   /// Steps 3 (seq), 4 and 5 of [open]; takes ownership of [vk] on success
   /// only (the caller wipes it on failure).
+  static Map<Tier, Uint8List> _snapshotTiers(Map<Tier, Uint8List> wrapped) =>
+      {for (final e in wrapped.entries) e.key: Uint8List.fromList(e.value)};
+
+  /// Copies what the items-hash check reads (id, tier, wrapped item key); the
+  /// body is never read by it, so it is shared rather than duplicated.
+  static List<SealedItem> _snapshotItems(List<SealedItem> items) => [
+        for (final i in items)
+          SealedItem(i.itemId, i.tier, Uint8List.fromList(i.wrappedItemKey), i.body)
+      ];
+
   static Future<VaultKeyring> _finishOpen(
     String vaultId,
     Uint8List vk,
@@ -683,10 +704,13 @@ abstract final class ItemCrypto {
     required Uint8List wrappedKey,
     required Uint8List stream,
   }) async {
+    // The stream is read after the first await, so it is snapshotted here
+    // (see ItemCrypto.open).
+    final st = Uint8List.fromList(stream);
     final fk = await Aead.open(tierKey, wrappedKey,
         type: ObjectType.wrappedKey, context: keyContext(vaultId, tier, tierEpoch, fileId));
     try {
-      return _unpad(await StreamCipher.decrypt(fk, stream, context: fileContext(vaultId, fileId)));
+      return _unpad(await StreamCipher.decrypt(fk, st, context: fileContext(vaultId, fileId)));
     } finally {
       wipe(fk);
     }

@@ -189,10 +189,14 @@ abstract final class XWing {
     if (ciphertext.length != ciphertextLength || secretKey.length != secretKeyLength) {
       throw const SsbCryptoException('bad decapsulation input');
     }
+    // Snapshot the ciphertext before the first await: it is read after
+    // _expand() has yielded, and an ML-KEM decapsulation of different bytes
+    // does not fail, it silently returns a different shared secret.
+    final ct = Uint8List.fromList(ciphertext);
     final e = await _expand(secretKey);
     try {
-      final ctM = Uint8List.fromList(ciphertext.sublist(0, 1088));
-      final ctX = Uint8List.fromList(ciphertext.sublist(1088, 1120));
+      final ctM = Uint8List.fromList(ct.sublist(0, 1088));
+      final ctX = Uint8List.fromList(ct.sublist(1088, 1120));
       final ssM = MlKem768.decaps(ctM, e.skM);
       final ssX = await _x25519Shared(e.skX, ctX);
       final ss = _combiner(ssM, ssX, ctX, e.pkX);

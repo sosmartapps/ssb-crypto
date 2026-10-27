@@ -41,7 +41,9 @@ abstract final class Aead {
       throw const SsbCryptoException('bad nonce');
     }
     final header = buildHeader(type);
-    final n = nonce ?? randomBytes(nonceLength);
+    // A caller-supplied nonce is copied too: it is written into the output
+    // after the cipher has yielded.
+    final n = nonce == null ? randomBytes(nonceLength) : Uint8List.fromList(nonce);
     // Snapshot every input BEFORE the first await. An async body runs
     // synchronously only up to its first await; a caller that wipes or
     // rotates its buffer while this call is pending (rotateTier()/dispose()
@@ -97,7 +99,12 @@ abstract final class Aead {
   }) async {
     _checkKey(key);
     if (blob.length < overhead) throw const SsbCryptoException('decrypt failed');
-    final header = Uint8List.sublistView(blob, 0, Suite.headerLength);
+    // Snapshot the whole blob: the header is checked here, but the nonce,
+    // ciphertext and tag views are read by the cipher after it has yielded,
+    // and a mid-flight change must not turn into a different (or merely
+    // inconsistent) result.
+    final b = Uint8List.fromList(blob);
+    final header = Uint8List.sublistView(b, 0, Suite.headerLength);
     if (!constantTimeEquals(header.sublist(0, 3), Suite.magic) ||
         header[3] != formatVersion ||
         !Suite.supported.contains(header[4]) ||
@@ -105,13 +112,11 @@ abstract final class Aead {
       throw const SsbCryptoException('decrypt failed');
     }
     final nonce = Uint8List.sublistView(
-        blob, Suite.headerLength, Suite.headerLength + nonceLength);
+        b, Suite.headerLength, Suite.headerLength + nonceLength);
     final ct = Uint8List.sublistView(
-        blob, Suite.headerLength + nonceLength, blob.length - tagLength);
-    final tag = Uint8List.sublistView(blob, blob.length - tagLength);
-    // Key snapshot for the same reason as in [seal]. The ciphertext is not
-    // copied: a caller mutating it mid-flight can only make authentication
-    // fail, never make it succeed on different bytes.
+        b, Suite.headerLength + nonceLength, b.length - tagLength);
+    final tag = Uint8List.sublistView(b, b.length - tagLength);
+    // Key snapshot for the same reason as in [seal].
     final k = Uint8List.fromList(key);
     final aad = concatBytes([header, context]);
     try {

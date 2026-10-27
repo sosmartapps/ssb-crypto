@@ -53,6 +53,9 @@ abstract final class ShamirV1 {
     if (shares.isEmpty) throw const SsbCryptoException('not enough shares');
     final k = shares.first.threshold;
     final len = shares.first.y.length;
+    // Snapshot the key check: it is compared after the final await (see
+    // Aead.seal).
+    final expectedCheck = Uint8List.fromList(shares.first.keyCheck);
     final byX = <int, ShareV1>{};
     for (final s in shares) {
       if (s.threshold != k || s.y.length != len || s.x < 1 || s.x > 255 ||
@@ -82,7 +85,7 @@ abstract final class ShamirV1 {
       }
       out[i] = acc;
     }
-    if (!constantTimeEquals(await _keyCheck(out), shares.first.keyCheck)) {
+    if (!constantTimeEquals(await _keyCheck(out), expectedCheck)) {
       wipe(out);
       throw const SsbCryptoException('shares do not match');
     }
@@ -139,16 +142,21 @@ abstract final class ReleaseV1 {
     required Uint8List sealedServerShare,
     required Uint8List beneficiarySecretKey,
   }) async {
+    // Snapshot the Secret Key and the sealed share before the first await
+    // (see Aead.seal): both are used only after the kit code has been decoded.
+    final sk = Uint8List.fromList(beneficiarySecretKey);
+    final sealed = Uint8List.fromList(sealedServerShare);
     final raw1 = await KitCode.decode(s1Label, beneficiaryKitCode, payloadLength: _shareLen);
     Uint8List? raw2;
     ShareV1? s1, s2;
     try {
       s1 = ShareV1.fromBytes(raw1);
-      raw2 = await Hpke.open(beneficiarySecretKey, sealedServerShare,
+      raw2 = await Hpke.open(sk, sealed,
           info: s2Info(vaultId, beneficiaryId, tier));
       s2 = ShareV1.fromBytes(raw2);
       return await ShamirV1.combine([s1, s2]);
     } finally {
+      wipe(sk);
       wipe(raw1);
       wipe(raw2);
       s1?.erase();
@@ -219,6 +227,11 @@ abstract final class VaultKeyringV1 {
     }
   }
 
+  /// The wrapped tier keys are walked across several awaits, so the map and
+  /// its blobs are snapshotted before the first one (see Aead.seal).
+  static Map<Tier, Uint8List> _snapshot(Map<Tier, Uint8List> wrapped) =>
+      {for (final e in wrapped.entries) e.key: Uint8List.fromList(e.value)};
+
   static Future<LegacyKeyring> open({
     required String vaultId,
     required Uint8List kek,
@@ -227,9 +240,10 @@ abstract final class VaultKeyringV1 {
     required Map<Tier, Uint8List> wrappedTierKeys,
   }) async {
     _requireAllTiers(wrappedTierKeys);
+    final wrapped = _snapshot(wrappedTierKeys);
     final vk = await Aead.openLegacyV1(kek, wrappedVaultKey,
         type: ObjectType.wrappedKey, context: vkContext(vaultId, slot));
-    return _tiers(vaultId, vk, wrappedTierKeys);
+    return _tiers(vaultId, vk, wrapped);
   }
 
   static Future<LegacyKeyring> fromVaultKey({
@@ -241,7 +255,7 @@ abstract final class VaultKeyringV1 {
       throw const SsbCryptoException('bad vault key');
     }
     _requireAllTiers(wrappedTierKeys);
-    return _tiers(vaultId, Uint8List.fromList(vaultKey), wrappedTierKeys);
+    return _tiers(vaultId, Uint8List.fromList(vaultKey), _snapshot(wrappedTierKeys));
   }
 
   static Future<LegacyKeyring> _tiers(
@@ -278,10 +292,12 @@ abstract final class ItemCryptoV1 {
     required Uint8List tierKey,
     required SealedItem item,
   }) async {
+    // item.body is read after the first await (see ItemCrypto.open).
+    final body = Uint8List.fromList(item.body);
     final ik = await Aead.openLegacyV1(tierKey, item.wrappedItemKey,
         type: ObjectType.wrappedKey, context: keyContext(vaultId, item.tier, item.itemId));
     try {
-      return _unpad(await Aead.openLegacyV1(ik, item.body,
+      return _unpad(await Aead.openLegacyV1(ik, body,
           type: ObjectType.item, context: bodyContext(vaultId, item.itemId)));
     } finally {
       wipe(ik);
@@ -296,10 +312,12 @@ abstract final class ItemCryptoV1 {
     required Uint8List wrappedKey,
     required Uint8List stream,
   }) async {
+    // The stream is read after the first await (see ItemCrypto.openFile).
+    final st = Uint8List.fromList(stream);
     final fk = await Aead.openLegacyV1(tierKey, wrappedKey,
         type: ObjectType.wrappedKey, context: keyContext(vaultId, tier, fileId));
     try {
-      return _unpad(await StreamCipher.decryptLegacyV1(fk, stream,
+      return _unpad(await StreamCipher.decryptLegacyV1(fk, st,
           context: bodyContext(vaultId, fileId)));
     } finally {
       wipe(fk);

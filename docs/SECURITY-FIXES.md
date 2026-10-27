@@ -17,6 +17,16 @@ do with it, and the change that fixed it.
   (`test/hpke_rfc_official_test.dart`). Thank you to Ibnu for the careful
   review; credited as a participant.
 
+## 2026-10-27 — follow-up reports (Ari)
+
+Two further reports (credited to Ari) found the same root cause as SSB-2026-001, a caller-owned buffer read after an `await`, in two functions our earlier sweeps had not covered. Neither exposes vault data; both could return a wrong value silently if the caller wiped or overwrote its buffer while the call was pending.
+
+- **`Hpke.keySchedule` read `info` and `sharedSecret` after an `await`.** The key schedule is built from several awaited steps; `info` was read at the second and `sharedSecret` at the third, so a buffer changed after the call had returned its `Future` produced a different key schedule with no error. *Fix:* both buffers are copied before the first `await` and the copies are wiped afterwards. Tests: `test/redteam_ari_keyschedule_safety_test.dart`, four cases that failed before the fix.
+- **`SafetyNumber.fingerprint` read `publicKey` after an `await`.** The key is mixed into each of the 5200 rounds, so a buffer changed mid-computation gave a different safety number with no error. *Fix:* the key is copied before the first `await`. Tests: three cases in `test/redteam_ari_keyschedule_safety_test.dart`, two of which failed before the fix.
+- **Already fixed:** the third item in the report, the recipient key read by `XWing.encapsulateDerand`, was fixed in the 2026-10-26 sweep as RT-2 (below).
+
+Because two functions had been missed, we replaced the manual sweep with a mechanical one. `test/redteam_snapshot_harness_test.dart` calls every public `Future`-returning function that takes a buffer (56 of them), wipes or bit-flips every argument right after the call returns, and requires the result to equal the one from pristine arguments. A registry in the same file fails the build if a new such function is added without a case. The harness found the same pattern in further places, all fixed the same way (copy before the first `await`): the `nonce` argument of `Aead.seal`; the blob arguments of `Aead.open`, `Aead.openLegacyV1`, `StreamCipher.decrypt`, `StreamCipher.decryptLegacyV1` and `Hpke.open`; the data argument of `StreamCipher.encrypt`; the ciphertext of `XWing.decapsulate`; `HybridSignature.verify` and `OwnerIdentity.verifyChallenge`; the legacy-form retry in `Unlock.openWithPassphrase`; `Release.recoverWithServerShare` and `ReleaseV1.recoverWithServerShare`; the key-check comparison in `Shamir.combine` and `ShamirV1.combine`; `VaultKeyring.open` and `VaultKeyring.fromVaultKey` (manifest blob, wrapped vault key, tier map, item list); `ItemCrypto.openFile`; and the v1 read paths `VaultKeyringV1`, `ItemCryptoV1.open` and `ItemCryptoV1.openFile`. In most of these the effect was a spurious "decrypt failed" or "stale slot" rather than a wrong value; none lets an outsider read or forge data.
+
 ## 2026-10-26 — our own red-team follow-up (sweep for siblings of SSB-2026-001 to -004)
 
 After four external reports in six days we read every context builder and every public entry point of `packages/ssb_crypto` for the shapes those reports had, and wrote a failing test for each candidate. Three real issues were found and fixed; none lets an outsider read, forge or roll back vault data.

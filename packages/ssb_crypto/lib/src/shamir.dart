@@ -147,6 +147,9 @@ abstract final class Shamir {
         first.epoch < 0 || first.epoch > Share.maxEpoch) {
       throw const SsbCryptoException('invalid share');
     }
+    // Snapshot the key check: it is compared after the final await (see
+    // Aead.seal). Everything else is consumed before the first await.
+    final expectedCheck = Uint8List.fromList(first.keyCheck);
     // Dedupe by share index (first occurrence wins; a repeated index with
     // different data is a conflict), then require k DISTINCT shares.
     final byX = <int, Share>{};
@@ -182,7 +185,7 @@ abstract final class Shamir {
       out[i] = acc;
     }
     if (!constantTimeEquals(
-        await _keyCheck(out, first.salt, first.epoch), first.keyCheck)) {
+        await _keyCheck(out, first.salt, first.epoch), expectedCheck)) {
       wipe(out);
       throw const SsbCryptoException('shares do not match');
     }

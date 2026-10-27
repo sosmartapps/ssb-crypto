@@ -88,12 +88,16 @@ abstract final class HybridSignature {
       return false;
     }
     final m = _domain(purpose, message);
+    // Snapshot the key and signature before the first await (see Aead.seal):
+    // the ML-DSA half is read after the Ed25519 check has yielded.
+    final pk = Uint8List.fromList(publicKey);
+    final sig = Uint8List.fromList(signature);
     final edOk = await _ed.verify(m,
-        signature: Signature(Uint8List.sublistView(signature, 0, edSigLen),
-            publicKey: SimplePublicKey(Uint8List.sublistView(publicKey, 0, edPkLen),
+        signature: Signature(Uint8List.sublistView(sig, 0, edSigLen),
+            publicKey: SimplePublicKey(Uint8List.sublistView(pk, 0, edPkLen),
                 type: KeyPairType.ed25519)));
-    final dsaOk = MlDsa65.verify(Uint8List.fromList(Uint8List.sublistView(publicKey, edPkLen)), m,
-        Uint8List.fromList(Uint8List.sublistView(signature, edSigLen)));
+    final dsaOk = MlDsa65.verify(Uint8List.fromList(Uint8List.sublistView(pk, edPkLen)), m,
+        Uint8List.fromList(Uint8List.sublistView(sig, edSigLen)));
     return edOk && dsaOk;
   }
 

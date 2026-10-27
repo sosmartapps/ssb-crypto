@@ -129,10 +129,14 @@ class OwnerIdentity {
     if (publicKey.length != 32 || signature.length != 64) return false;
     if (nonce.length < nonceMin || nonce.length > nonceMax) return false;
     if (vaultIdFor(publicKey) != vaultId) return false;
+    // Snapshot the key and signature: the verifier may read them after it
+    // has yielded (see Aead.seal).
+    final pk = Uint8List.fromList(publicKey);
+    final sig = Uint8List.fromList(signature);
     return _ed.verify(
       challengeMessage(vaultId, nonce, purpose: purpose),
-      signature: Signature(signature,
-          publicKey: SimplePublicKey(publicKey, type: KeyPairType.ed25519)),
+      signature: Signature(sig,
+          publicKey: SimplePublicKey(pk, type: KeyPairType.ed25519)),
     );
   }
 
