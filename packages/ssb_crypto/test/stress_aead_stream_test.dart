@@ -130,25 +130,27 @@ void main() {
     test('every byte of wrapped item key and body: open fails; cross-slot moves fail', () async {
       final tk = randomBytes(32);
       final item = await ItemCrypto.seal(
-          vaultId: 'V', tier: Tier.secrets, tierKey: tk, itemId: 'I', plaintext: rnd(r, 100));
+          vaultId: 'V', tier: Tier.secrets, tierKey: tk, tierEpoch: 1, itemId: 'I', plaintext: rnd(r, 100));
       final f = Fails();
       for (var i = 0; i < item.wrappedItemKey.length; i++) {
-        await f.mustFail('wik $i', () => ItemCrypto.open(vaultId: 'V', tierKey: tk,
+        await f.mustFail('wik $i', () => ItemCrypto.open(vaultId: 'V', tierKey: tk, tierEpoch: 1,
             item: SealedItem('I', Tier.secrets, flip(item.wrappedItemKey, i), item.body)));
       }
       for (var i = 0; i < item.body.length; i++) {
-        await f.mustFail('body $i', () => ItemCrypto.open(vaultId: 'V', tierKey: tk,
+        await f.mustFail('body $i', () => ItemCrypto.open(vaultId: 'V', tierKey: tk, tierEpoch: 1,
             item: SealedItem('I', Tier.secrets, item.wrappedItemKey, flip(item.body, i))));
       }
-      await f.mustFail('other vault', () => ItemCrypto.open(vaultId: 'V2', tierKey: tk, item: item));
-      await f.mustFail('other item id', () => ItemCrypto.open(vaultId: 'V', tierKey: tk,
+      await f.mustFail('other vault', () => ItemCrypto.open(vaultId: 'V2', tierKey: tk, tierEpoch: 1, item: item));
+      await f.mustFail('other item id', () => ItemCrypto.open(vaultId: 'V', tierKey: tk, tierEpoch: 1,
           item: SealedItem('I2', Tier.secrets, item.wrappedItemKey, item.body)));
-      await f.mustFail('other tier', () => ItemCrypto.open(vaultId: 'V', tierKey: tk,
+      await f.mustFail('other tier', () => ItemCrypto.open(vaultId: 'V', tierKey: tk, tierEpoch: 1,
           item: SealedItem('I', Tier.ice, item.wrappedItemKey, item.body)));
-      await f.mustFail('wrong tier key', () => ItemCrypto.open(vaultId: 'V', tierKey: randomBytes(32), item: item));
+      await f.mustFail('other epoch', () => ItemCrypto.open(vaultId: 'V', tierKey: tk, tierEpoch: 2, item: item));
+      await f.mustFail('epoch 0', () => ItemCrypto.open(vaultId: 'V', tierKey: tk, tierEpoch: 0, item: item));
+      await f.mustFail('wrong tier key', () => ItemCrypto.open(vaultId: 'V', tierKey: randomBytes(32), tierEpoch: 1, item: item));
       // body from a different item with valid wrapped key
-      final other = await ItemCrypto.seal(vaultId: 'V', tier: Tier.secrets, tierKey: tk, itemId: 'I', plaintext: rnd(r, 100));
-      await f.mustFail('body swap', () => ItemCrypto.open(vaultId: 'V', tierKey: tk,
+      final other = await ItemCrypto.seal(vaultId: 'V', tier: Tier.secrets, tierKey: tk, tierEpoch: 1, itemId: 'I', plaintext: rnd(r, 100));
+      await f.mustFail('body swap', () => ItemCrypto.open(vaultId: 'V', tierKey: tk, tierEpoch: 1,
           item: SealedItem('I', Tier.secrets, item.wrappedItemKey, other.body)));
       f.done();
     });
@@ -165,8 +167,8 @@ void main() {
       final tk = randomBytes(32);
       for (final n in [0, 1, 251, 252, 253, 255, 256, 1000, 70000]) {
         final pt = rnd(r, n);
-        final it = await ItemCrypto.seal(vaultId: 'V', tier: Tier.ice, tierKey: tk, itemId: 'I', plaintext: pt);
-        expect(await ItemCrypto.open(vaultId: 'V', tierKey: tk, item: it), pt);
+        final it = await ItemCrypto.seal(vaultId: 'V', tier: Tier.ice, tierKey: tk, tierEpoch: 1, itemId: 'I', plaintext: pt);
+        expect(await ItemCrypto.open(vaultId: 'V', tierKey: tk, tierEpoch: 1, item: it), pt);
       }
     });
 
@@ -174,7 +176,7 @@ void main() {
       final tk = randomBytes(32);
       final ik = randomBytes(32);
       final wik = await Aead.seal(tk, ik,
-          type: ObjectType.wrappedKey, context: utf8Bytes('ssb/v1/ik|vault:V|tier:ice|item:I'));
+          type: ObjectType.wrappedKey, context: ItemCrypto.keyContext('V', Tier.ice, 1, 'I'));
       final f = Fails();
       for (final p in [
         Uint8List.fromList([0xff, 0xff, 0xff, 0xff, 1, 2, 3]),
@@ -183,32 +185,40 @@ void main() {
         Uint8List(0),
         Uint8List.fromList([0x80, 0, 0, 0]),
       ]) {
-        final body = await Aead.seal(ik, p, type: ObjectType.item, context: utf8Bytes('ssb/v1/item|vault:V|item:I'));
+        final body = await Aead.seal(ik, p, type: ObjectType.item, context: ItemCrypto.bodyContext('V', 'I'));
         await f.mustFail('prefix ${hexEncode(p)}', () => ItemCrypto.open(
-            vaultId: 'V', tierKey: tk, item: SealedItem('I', Tier.ice, wik, body)));
+            vaultId: 'V', tierKey: tk, tierEpoch: 1, item: SealedItem('I', Tier.ice, wik, body)));
       }
       f.done();
     });
 
-    test('keyring: wrapped vault/tier keys fail under any byte flip, wrong slot, wrong vault', () async {
-      final ring = VaultKeyring.create('V');
+    test('keyring: wrapped vault/tier keys and manifest fail under any byte flip, wrong slot, wrong vault', () async {
+      final anchor = InMemoryAnchor();
+      final ring = VaultKeyring.create('V', anchor: anchor);
       final kek = randomBytes(32);
-      final wvk = await ring.wrapVaultKey(kek, slot: 'unlock');
+      final wvk = await ring.wrapVaultKey(kek, slot: 'unlock', epoch: 1);
       final wtk = {for (final t in Tier.values) t: await ring.wrapTierKey(t)};
+      final manifest = await ring.sealManifest(items: const []);
+      Future<VaultKeyring> open({Uint8List? vk, Map<Tier, Uint8List>? tiers, Uint8List? m, String slot = 'unlock', String vault = 'V'}) =>
+          VaultKeyring.open(vaultId: vault, kek: kek, slot: slot, wrappedVaultKey: vk ?? wvk, slotEpochs: ring.slotEpochs,
+              manifestBlob: m ?? manifest, wrappedTierKeys: tiers ?? wtk, items: const [], anchor: anchor);
+      (await open()).dispose();
       final f = Fails();
       for (var i = 0; i < wvk.length; i++) {
-        await f.mustFail('wvk $i', () => VaultKeyring.open(vaultId: 'V', kek: kek, slot: 'unlock',
-            wrappedVaultKey: flip(wvk, i), wrappedTierKeys: wtk));
+        await f.mustFail('wvk $i', () => open(vk: flip(wvk, i)));
       }
       for (final t in Tier.values) {
         for (var i = 0; i < wtk[t]!.length; i += 3) {
-          await f.mustFail('wtk ${t.name} $i', () => VaultKeyring.open(vaultId: 'V', kek: kek, slot: 'unlock',
-              wrappedVaultKey: wvk, wrappedTierKeys: {...wtk, t: flip(wtk[t]!, i)}));
+          await f.mustFail('wtk ${t.name} $i', () => open(tiers: {...wtk, t: flip(wtk[t]!, i)}));
         }
       }
+      for (var i = 0; i < manifest.length; i += 3) {
+        await f.mustFail('manifest $i', () => open(m: flip(manifest, i)));
+      }
       // tier key wrapped for ice presented as secrets
-      await f.mustFail('tier swap', () => VaultKeyring.open(vaultId: 'V', kek: kek, slot: 'unlock',
-          wrappedVaultKey: wvk, wrappedTierKeys: {Tier.secrets: wtk[Tier.ice]!}));
+      await f.mustFail('tier swap', () => open(tiers: {...wtk, Tier.secrets: wtk[Tier.ice]!}));
+      await f.mustFail('slot', () => open(slot: 'recovery'));
+      await f.mustFail('vault', () => open(vault: 'W'));
       f.done();
     });
   });
@@ -347,15 +357,15 @@ void main() {
     test('files via ItemCrypto: tamper every 7th byte, wrong ids', () async {
       final tk = randomBytes(32);
       final (wk, st) = await ItemCrypto.sealFile(
-          vaultId: 'V', tier: Tier.essentials, tierKey: tk, fileId: 'F', data: rnd(r, 700));
-      expect(await ItemCrypto.openFile(vaultId: 'V', tier: Tier.essentials, tierKey: tk, fileId: 'F', wrappedKey: wk, stream: st), hasLength(700));
+          vaultId: 'V', tier: Tier.essentials, tierKey: tk, tierEpoch: 1, fileId: 'F', data: rnd(r, 700));
+      expect(await ItemCrypto.openFile(vaultId: 'V', tier: Tier.essentials, tierKey: tk, tierEpoch: 1, fileId: 'F', wrappedKey: wk, stream: st), hasLength(700));
       final f = Fails();
       for (var i = 0; i < st.length; i += 7) {
-        await f.mustFail('stream $i', () => ItemCrypto.openFile(vaultId: 'V', tier: Tier.essentials, tierKey: tk, fileId: 'F', wrappedKey: wk, stream: flip(st, i)));
+        await f.mustFail('stream $i', () => ItemCrypto.openFile(vaultId: 'V', tier: Tier.essentials, tierKey: tk, tierEpoch: 1, fileId: 'F', wrappedKey: wk, stream: flip(st, i)));
       }
-      await f.mustFail('file id', () => ItemCrypto.openFile(vaultId: 'V', tier: Tier.essentials, tierKey: tk, fileId: 'G', wrappedKey: wk, stream: st));
-      await f.mustFail('tier', () => ItemCrypto.openFile(vaultId: 'V', tier: Tier.ice, tierKey: tk, fileId: 'F', wrappedKey: wk, stream: st));
-      await f.mustFail('vault', () => ItemCrypto.openFile(vaultId: 'W', tier: Tier.essentials, tierKey: tk, fileId: 'F', wrappedKey: wk, stream: st));
+      await f.mustFail('file id', () => ItemCrypto.openFile(vaultId: 'V', tier: Tier.essentials, tierKey: tk, tierEpoch: 1, fileId: 'G', wrappedKey: wk, stream: st));
+      await f.mustFail('tier', () => ItemCrypto.openFile(vaultId: 'V', tier: Tier.ice, tierKey: tk, tierEpoch: 1, fileId: 'F', wrappedKey: wk, stream: st));
+      await f.mustFail('vault', () => ItemCrypto.openFile(vaultId: 'W', tier: Tier.essentials, tierKey: tk, tierEpoch: 1, fileId: 'F', wrappedKey: wk, stream: st));
       f.done();
     });
   });

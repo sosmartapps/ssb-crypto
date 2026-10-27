@@ -65,7 +65,8 @@ void main() {
     test('round trip and header layout', () async {
       final blob = await Aead.seal(key, Uint8List.fromList([1, 2, 3]),
           type: ObjectType.item, context: [9]);
-      expect(blob.sublist(0, 6), [0x53, 0x53, 0x42, 1, Suite.v1, ObjectType.item.code]);
+      expect(blob.sublist(0, 6), [0x53, 0x53, 0x42, Suite.formatVersion, Suite.v1, ObjectType.item.code]);
+      expect(Suite.formatVersion, 2);
       expect(await Aead.open(key, blob, type: ObjectType.item, context: [9]), [1, 2, 3]);
     });
     test('rejects tamper, wrong context, wrong type, downgrade, wrong key', () async {
@@ -83,20 +84,20 @@ void main() {
   group('Shamir 2-of-3', () {
     test('any two shares recover; one does not; mismatches are caught', () async {
       final secret = randomBytes(32);
-      final s = await Shamir.split(secret);
+      final s = await Shamir.split(secret, epoch: 1);
       for (final pair in [[0, 1], [0, 2], [1, 2], [2, 0]]) {
         expect(await Shamir.combine([s[pair[0]], s[pair[1]]]), secret);
       }
       await expectLater(Shamir.combine([s[0]]), throwsSsb);
       await expectLater(Shamir.combine([s[0], s[0]]), throwsSsb);
-      final other = await Shamir.split(randomBytes(32));
+      final other = await Shamir.split(randomBytes(32), epoch: 1);
       await expectLater(Shamir.combine([s[0], other[1]]), throwsSsb);
       final bad = Share.fromBytes(s[1].toBytes()..[20] ^= 0x40);
       await expectLater(Shamir.combine([s[0], bad]), throwsSsb);
     });
     test('3-of-5 works and 2 shares are not enough', () async {
       final secret = randomBytes(32);
-      final s = await Shamir.split(secret, shares: 5, threshold: 3);
+      final s = await Shamir.split(secret, shares: 5, threshold: 3, epoch: 1);
       expect(await Shamir.combine([s[4], s[1], s[3]]), secret);
       await expectLater(Shamir.combine([s[0], s[1]]), throwsSsb);
     });
@@ -105,7 +106,7 @@ void main() {
       final secret = Uint8List(16);
       final counts = List.filled(256, 0);
       for (var i = 0; i < 4096; i++) {
-        counts[(await Shamir.split(secret)).first.y[0]]++;
+        counts[(await Shamir.split(secret, epoch: 1)).first.y[0]]++;
       }
       expect(counts.where((c) => c == 0).length, lessThan(3));
     });

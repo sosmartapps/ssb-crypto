@@ -59,6 +59,12 @@ abstract final class HybridSignature {
     if (secretKey.length != secretKeyLength) {
       throw const SsbCryptoException('bad signing key');
     }
+    // Tripwire (red team 2026-10-20, B6): an all-zero half is a wiped
+    // buffer, never a generated key; it must not produce a signature.
+    if (isAllZero(Uint8List.sublistView(secretKey, 0, edSkLen)) ||
+        isAllZero(Uint8List.sublistView(secretKey, edSkLen))) {
+      throw const SsbCryptoException('bad signing key');
+    }
     final m = _domain(purpose, message);
     // Snapshot the key halves before the first await (see Aead.seal).
     final edSeed = Uint8List.fromList(Uint8List.sublistView(secretKey, 0, edSkLen));

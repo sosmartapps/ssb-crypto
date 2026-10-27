@@ -1,7 +1,9 @@
 import 'dart:convert';
-import 'package:pointycastle/digests/shake.dart';
 import 'dart:math';
 import 'dart:typed_data';
+
+import 'package:pointycastle/digests/sha256.dart';
+import 'package:pointycastle/digests/shake.dart';
 
 /// Every failure surfaces as this one type with a generic message, so error
 /// text never becomes an oracle (which check failed stays internal).
@@ -58,10 +60,22 @@ bool isAllZero(List<int> b) {
   return acc == 0;
 }
 
-Uint8List u16be(int v) => Uint8List.fromList([(v >> 8) & 0xff, v & 0xff]);
+/// Big-endian 2-byte integer. Throws [SsbCryptoException] outside 0..0xffff:
+/// a silent `& 0xff` truncation would make 65536 encode like 0 and -1 like
+/// 65535, so two different epochs or lengths could share one context (red
+/// team 2026-10-26, sibling of SSB-2026-004 -- ambiguous encoding).
+Uint8List u16be(int v) {
+  if (v < 0 || v > 0xffff) throw const SsbCryptoException('integer out of range');
+  return Uint8List.fromList([(v >> 8) & 0xff, v & 0xff]);
+}
 
-Uint8List u32be(int v) => Uint8List.fromList(
-    [(v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff]);
+/// Big-endian 4-byte integer. Throws [SsbCryptoException] outside
+/// 0..0xffffffff (see [u16be]).
+Uint8List u32be(int v) {
+  if (v < 0 || v > 0xffffffff) throw const SsbCryptoException('integer out of range');
+  return Uint8List.fromList(
+      [(v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff]);
+}
 
 Uint8List utf8Bytes(String s) => Uint8List.fromList(utf8.encode(s));
 
@@ -95,6 +109,38 @@ Uint8List lengthPrefixed(String field) {
 
 String hexEncode(List<int> b) =>
     b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+
+/// Format-v2 domain-separation context (SSB-2026-002, design D8):
+///
+///     'ssb/v2/' || lp(what) || field_1 || ... || field_n
+///
+/// where a [String] field is encoded as [lengthPrefixed] and a byte field
+/// (`List<int>`, e.g. a `Uint8List`) is appended raw. Raw fields MUST be
+/// fixed-width -- integers go through an explicit width helper
+/// (`u16be(epoch)`, `u32be(seq)`) and hashes are their fixed digest length --
+/// so the encoding is injective: no two field lists produce the same bytes.
+/// A bare [int] is refused ([ArgumentError]) precisely so the width is always
+/// spelled out at the call site.
+Uint8List ctx2(String what, List<Object> fields) {
+  final parts = <List<int>>[utf8Bytes('ssb/v2/'), lengthPrefixed(what)];
+  for (final f in fields) {
+    if (f is String) {
+      parts.add(lengthPrefixed(f));
+    } else if (f is List<int>) {
+      parts.add(f);
+    } else {
+      throw ArgumentError.value(f, 'fields',
+          'ctx2 fields must be String or bytes (use u16be/u32be for integers)');
+    }
+  }
+  return concatBytes(parts);
+}
+
+/// SHA-256 of [data] (32 bytes), synchronous. Used for the manifest's
+/// item-set hash, slot hashes and the tier-export chain -- public values,
+/// never key material.
+Uint8List sha256Of(List<int> data) =>
+    SHA256Digest().process(data is Uint8List ? data : Uint8List.fromList(data));
 
 /// SHAKE256 XOF. (pointycastle 4.0.0's SHAKEDigest.doFinal passes the wrong
 /// offset; doFinalRange is the correct entry point.)

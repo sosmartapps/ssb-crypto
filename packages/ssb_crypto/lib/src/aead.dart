@@ -8,10 +8,16 @@ import 'suite.dart';
 /// AES-256-GCM with a versioned header (spec §6.2).
 ///
 /// Output: header(6) | nonce(12) | ciphertext | tag(16)
-/// AAD:    header | caller context (e.g. `vault:ID/item:ID`)
+/// AAD:    header | caller context (a `ctx2(...)` value for format v2)
 ///
 /// Every item has its own random key, so random 96-bit nonces stay far
 /// below the GCM per-key usage limits.
+///
+/// Format versions: [seal] always writes [Suite.formatVersion] (2) and
+/// [open] accepts only that. Objects written by the previous format are
+/// opened through [openLegacyV1] alone, which in turn accepts only version
+/// byte 1 -- the two never overlap, so a v1 blob cannot be presented as a
+/// v2 one or vice versa (SSB-2026-002, design D8).
 abstract final class Aead {
   static final AesGcm _gcm = AesGcm.with256bits();
   static const keyLength = 32;
@@ -59,17 +65,41 @@ abstract final class Aead {
     }
   }
 
+  /// Opens a format-v2 object. A blob whose header carries any other format
+  /// version (a v1 object included) fails with `decrypt failed`.
   static Future<Uint8List> open(
     Uint8List key,
     Uint8List blob, {
     required ObjectType type,
     List<int> context = const [],
+  }) =>
+      _open(key, blob, type: type, context: context, formatVersion: Suite.formatVersion);
+
+  /// Opens a format-v1 object (header version byte 1) and nothing else.
+  ///
+  /// For the v1 -> v2 migration and `package:ssb_crypto/legacy_v1.dart`
+  /// only. The caller supplies the v1 context string; this method does not
+  /// know or check what the context means, it only refuses non-v1 headers.
+  static Future<Uint8List> openLegacyV1(
+    Uint8List key,
+    Uint8List blob, {
+    required ObjectType type,
+    List<int> context = const [],
+  }) =>
+      _open(key, blob, type: type, context: context, formatVersion: Suite.legacyFormatVersion);
+
+  static Future<Uint8List> _open(
+    Uint8List key,
+    Uint8List blob, {
+    required ObjectType type,
+    required List<int> context,
+    required int formatVersion,
   }) async {
     _checkKey(key);
     if (blob.length < overhead) throw const SsbCryptoException('decrypt failed');
     final header = Uint8List.sublistView(blob, 0, Suite.headerLength);
     if (!constantTimeEquals(header.sublist(0, 3), Suite.magic) ||
-        header[3] != Suite.formatVersion ||
+        header[3] != formatVersion ||
         !Suite.supported.contains(header[4]) ||
         header[5] != type.code) {
       throw const SsbCryptoException('decrypt failed');

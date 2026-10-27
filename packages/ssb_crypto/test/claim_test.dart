@@ -36,7 +36,7 @@ void main() {
   // The Dart client and the Node server both compute this. If either side
   // drifts, a real beneficiary gets "that did not match" while holding a
   // valid Kit -- so both sides pin the same vector.
-  test('golden vector (mirrored in backend/functions/src/claim.test.js)', () async {
+  test('golden vector (also checked by the server-side implementation)', () async {
     final sk = Uint8List.fromList([for (var i = 0; i < 2400; i++) i % 256]);
     final token = await ClaimToken.compute(beneficiarySecretKey: sk);
     expect(

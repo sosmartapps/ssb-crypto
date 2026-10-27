@@ -57,14 +57,26 @@ abstract final class StreamCipher {
     }
   }
 
+  /// Decrypts a format-v2 stream. A v1 stream fails with `decrypt failed`;
+  /// see [decryptLegacyV1].
   static Future<Uint8List> decrypt(Uint8List fileKey, Uint8List blob,
-      {List<int> context = const []}) async {
+          {List<int> context = const []}) =>
+      _decrypt(fileKey, blob, context: context, formatVersion: Suite.formatVersion);
+
+  /// Decrypts a format-v1 stream (header version byte 1) and nothing else.
+  /// For the v1 -> v2 migration (`package:ssb_crypto/legacy_v1.dart`) only.
+  static Future<Uint8List> decryptLegacyV1(Uint8List fileKey, Uint8List blob,
+          {List<int> context = const []}) =>
+      _decrypt(fileKey, blob, context: context, formatVersion: Suite.legacyFormatVersion);
+
+  static Future<Uint8List> _decrypt(Uint8List fileKey, Uint8List blob,
+      {required List<int> context, required int formatVersion}) async {
     const headLen = Suite.headerLength + _prefixLen + 4;
     if (fileKey.length != 32 || isAllZero(fileKey) || blob.length < headLen + _tag) {
       throw const SsbCryptoException('decrypt failed');
     }
     final head = Uint8List.sublistView(blob, 0, headLen);
-    final expected = buildHeader(ObjectType.fileStream);
+    final expected = buildHeader(ObjectType.fileStream, formatVersion: formatVersion);
     if (!constantTimeEquals(head.sublist(0, Suite.headerLength), expected)) {
       throw const SsbCryptoException('decrypt failed');
     }

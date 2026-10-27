@@ -32,9 +32,11 @@ abstract final class ClaimToken {
   ///
   /// [beneficiarySecretKey] must be at least [minKeyLength] bytes (the real
   /// key is the 32-byte X-Wing seed); an empty or short key would make the
-  /// token guessable, so it is refused with [SsbCryptoException].
+  /// token guessable, so it is refused with [SsbCryptoException]. So is an
+  /// all-zero key: that is a wiped buffer, and its token is a constant
+  /// (red team 2026-10-20, B6).
   static Future<String> compute({required Uint8List beneficiarySecretKey}) async {
-    if (beneficiarySecretKey.length < minKeyLength) {
+    if (beneficiarySecretKey.length < minKeyLength || isAllZero(beneficiarySecretKey)) {
       throw const SsbCryptoException('bad claim key');
     }
     return hexEncode((await Sha512().hash(concatBytes([
@@ -66,10 +68,16 @@ abstract final class ClaimToken {
 abstract final class OwnerToken {
   static const _context = 'ssb/v1/owner';
 
+  /// An empty or all-zero [vaultKey] is a disposed keyring, not an owner;
+  /// it is refused with [SsbCryptoException] rather than turned into a
+  /// constant, guessable token (red team 2026-10-20, B6).
   static Future<String> compute({
     required String vaultId,
     required Uint8List vaultKey,
   }) async {
+    if (vaultKey.isEmpty || isAllZero(vaultKey)) {
+      throw const SsbCryptoException('bad owner key');
+    }
     final v = utf8Bytes(vaultId);
     return hexEncode((await Sha512().hash(concatBytes([
       u16be(1),

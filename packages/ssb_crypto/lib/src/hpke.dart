@@ -24,6 +24,9 @@ abstract final class Hpke {
   /// Seal [plaintext] to [recipientPublicKey]. Returns enc(1120) || ciphertext.
   static Future<Uint8List> seal(Uint8List recipientPublicKey, Uint8List plaintext,
       {List<int> info = const [], List<int> aad = const []}) async {
+    // A zero / zero-half recipient key would make this ciphertext public
+    // (B1); refuse before touching the plaintext.
+    XWing.validatePublicKey(recipientPublicKey);
     // Snapshot every caller-owned input before the first await (see
     // Aead.seal). encapsulate() and keySchedule() both await before the
     // plaintext is touched.

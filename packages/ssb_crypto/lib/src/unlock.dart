@@ -62,6 +62,15 @@ abstract final class Unlock {
     if (secretKey.length != secretKeyLength || accountSalt.length != saltLength) {
       throw const SsbCryptoException('bad unlock input');
     }
+    // Tripwires (red team 2026-10-20, B6). An all-zero Secret Key is a wiped
+    // buffer, and deriving from it would quietly turn this into a
+    // passphrase-only key -- the exact failure the Secret Key exists to
+    // prevent. A zero salt is never generated either, and an empty
+    // passphrase would rest on the Secret Key alone. (The app enforces its
+    // own passphrase policy on top of this.)
+    if (isAllZero(secretKey) || isAllZero(accountSalt) || passphrase.isEmpty) {
+      throw const SsbCryptoException('bad unlock input');
+    }
     params.validateForUnlock();
     final pw = utf8Bytes(normalize ? normalizePassphrase(passphrase) : passphrase);
     // Snapshot the Secret Key and salt before the (long) Argon2 await, so a

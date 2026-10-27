@@ -28,12 +28,15 @@ flutter test
 - Anything where two inputs could be confused for one another (domain separation, encodings)
 
 ## Security fixes
-See `docs/SECURITY-FIXES.md` for every bounty finding and what changed (SSB-2026-001: in-flight wrap could seal a zero key; fixed 2026-10-15).
+See `docs/SECURITY-FIXES.md` for every finding and what changed: SSB-2026-001 (in-flight wrap sealed a zero key), -002 (tier keys, slots, items and manifests could be rolled back; fixed by format v2), -003 (vault ids not bound to a key), -004 (key-wrap context collision), and our own 2026-10-26 follow-up sweep. The v2 design is in `docs/CRYPTO-DESIGN.md` section 2a.
 
 ## Known limitations (so you do not spend time on them)
 - The crypto is pure Dart today. It is not constant-time and secrets cannot be reliably wiped from memory. Native and hardware-backed primitives are planned.
-- Backend hardening (claim throttling, a signed audit log) is still in progress; the server is not part of this repository.
-- The server (Firebase) code is not part of this repository.
+- The server (Firebase) code is not part of this repository, and server hardening is still in progress; the bounty covers this package only.
+- Freshness is anchored per device: on the web the anchor is in `localStorage` and can be cleared, and a device that has never seen a vault cannot detect a same-epoch rollback until an owner-signed manifest head exists (planned).
+- Files are not yet bound into the manifest (the app stores none today); older versions of the same file id would still open at the same epoch.
+- The Argon2id parameters stored beside a vault are not authenticated by the manifest; a hostile server can raise the cost (denial of service) or lower it only to the enforced floor.
+- Format-v1 read-only code (`legacy_v1.dart`) keeps the old delimiter-joined contexts on purpose; see SSB-2026-004.
 
 ## Contact
 leon@sosmartapps.app. License: MIT (see LICENSE).
