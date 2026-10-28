@@ -2,7 +2,7 @@
 
 Findings from the bug bounty (see `../SECURITY.md`) and from our own follow-up
 reviews, newest first. Each entry says what was wrong, what an attacker could
-do with it, and the commit that fixed it.
+do with it, and the change that fixed it.
 
 ## utf8Bytes was not injective -- a lone UTF-16 surrogate encoded identically to U+FFFD (Low)
 
@@ -49,6 +49,47 @@ do with it, and the commit that fixed it.
   not. The official vector is now a regression test
   (`test/hpke_rfc_official_test.dart`). Thank you to Ibnu for the careful
   review; credited as a participant.
+
+## 2026-10-27 — follow-up reports (Ari)
+
+Two further reports (credited to Ari) found the same root cause as SSB-2026-001, a caller-owned buffer read after an `await`, in two functions our earlier sweeps had not covered. Neither exposes vault data; both could return a wrong value silently if the caller wiped or overwrote its buffer while the call was pending.
+
+- **`Hpke.keySchedule` read `info` and `sharedSecret` after an `await`.** The key schedule is built from several awaited steps; `info` was read at the second and `sharedSecret` at the third, so a buffer changed after the call had returned its `Future` produced a different key schedule with no error. *Fix:* both buffers are copied before the first `await` and the copies are wiped afterwards. Tests: `test/redteam_ari_keyschedule_safety_test.dart`, four cases that failed before the fix.
+- **`SafetyNumber.fingerprint` read `publicKey` after an `await`.** The key is mixed into each of the 5200 rounds, so a buffer changed mid-computation gave a different safety number with no error. *Fix:* the key is copied before the first `await`. Tests: three cases in `test/redteam_ari_keyschedule_safety_test.dart`, two of which failed before the fix.
+- **Already fixed:** the third item in the report, the recipient key read by `XWing.encapsulateDerand`, was fixed in the 2026-10-26 sweep as RT-2 (below).
+
+Because two functions had been missed, we replaced the manual sweep with a mechanical one. `test/redteam_snapshot_harness_test.dart` calls every public `Future`-returning function that takes a buffer (56 of them), wipes or bit-flips every argument right after the call returns, and requires the result to equal the one from pristine arguments. A registry in the same file fails the build if a new such function is added without a case. The harness found the same pattern in further places, all fixed the same way (copy before the first `await`): the `nonce` argument of `Aead.seal`; the blob arguments of `Aead.open`, `Aead.openLegacyV1`, `StreamCipher.decrypt`, `StreamCipher.decryptLegacyV1` and `Hpke.open`; the data argument of `StreamCipher.encrypt`; the ciphertext of `XWing.decapsulate`; `HybridSignature.verify` and `OwnerIdentity.verifyChallenge`; the legacy-form retry in `Unlock.openWithPassphrase`; `Release.recoverWithServerShare` and `ReleaseV1.recoverWithServerShare`; the key-check comparison in `Shamir.combine` and `ShamirV1.combine`; `VaultKeyring.open` and `VaultKeyring.fromVaultKey` (manifest blob, wrapped vault key, tier map, item list); `ItemCrypto.openFile`; and the v1 read paths `VaultKeyringV1`, `ItemCryptoV1.open` and `ItemCryptoV1.openFile`. In most of these the effect was a spurious "decrypt failed" or "stale slot" rather than a wrong value; none lets an outsider read or forge data.
+
+## 2026-10-26 — our own red-team follow-up (sweep for siblings of SSB-2026-001 to -004)
+
+After four external reports in six days we read every context builder and every public entry point of `packages/ssb_crypto` for the shapes those reports had, and wrote a failing test for each candidate. Three real issues were found and fixed; none lets an outsider read, forge or roll back vault data.
+
+- **RT-1, tier export chain could fork (Low-Medium; found by us).** Two overlapping `sealTierExport` calls for the same tier both read the same sequence number and previous-export hash before either finished, so the keyring's recorded chain head could name an export the server had rejected, and a beneficiary's chain check would then fail until the next rotation. No attacker was needed: the app could trigger it with two quick edits. *Fix:* the key, epoch and plaintext are snapshotted before the first `await` and calls for one tier run strictly one after another. Tests: `test/redteam_siblings_test.dart`.
+- **RT-2, recipient public key read after an `await` (Low; same pattern as SSB-2026-001).** SSB-2026-001 covered secret buffers; `XWing.encapsulateDerand` and `Release.create` also validated the caller's *public* key buffer and then read it again after awaiting. A buffer wiped or overwritten in that window of about a millisecond could make the post-quantum half of the hybrid seal to a zero key, leaving only the X25519 half protecting the share. It needed a wipe of the recipient-key buffer at exactly that moment. *Fix:* the public key and the encapsulation seed are copied before the first `await`, validated as copies, and the seed copy is wiped afterwards. Tests: three cases in `test/redteam_siblings_test.dart`, each failing before the fix.
+- **RT-3, integer encoders truncated silently (Low, hardening; same family as SSB-2026-004).** `u16be`/`u32be` reduced out-of-range values (an epoch of 2^32 encoded like 0, a 65,536-byte id like a 0-byte one), so "no two inputs encode alike" held only for in-range input. Epochs come from the keyring or from authenticated headers, so no attack was found, but a test showed an item sealed at epoch 0 opening at epoch 2^32. *Fix:* both encoders now throw outside 0..0xffff and 0..0xffffffff. Tests: `test/redteam_siblings_test.dart`, `test/redteam_ssb2026_004_regression_test.dart`.
+- **Pinned, not changed.** The v1 read-only code keeps its old `|`-joined contexts because it must reproduce what was sealed earlier; tests prove the collision is still present in those encodings and that no caller can reach it (`test/redteam_injectivity_test.dart`). The same file registers every `ctx2` label and fails the build if a new context builder is added without an injectivity test.
+
+## SSB-2026-004 — key-wrap context collision across vault, tier and item ids (Low)
+
+- **Reported:** 2026-10-25 by Lehem Costa, against `a7f304f`. First report of this root cause. Thank you, Lehem.
+- **What was wrong:** in format v1 the data a wrapped item or file key was bound to was the string `ssb/v1/ik|vault:<vaultId>|tier:<tier>|item:<itemId>` with no length prefixes. Two different tuples, for example vault `V|tier:ice|item:B` with item `C`, and vault `V` with item `B|tier:ice|item:C`, produced identical bytes, so a wrapped key opened in the other slot. The sibling Vault Key slot context (`ssb/v1/vk/<slot>|vault:<vaultId>`) had the same shape.
+- **What an attacker could do:** the item *body* context did not include the tier, so no plaintext was exposed, and the attack needs an identifier containing the literal delimiter text, which the app does not generate. It still broke the binding between a key and the slot it belongs to, which is a domain-separation flaw.
+- **Fix:** format v2 builds every context with `ctx2`: `'ssb/v2/'` plus length-prefixed fields and fixed-width integers, with the key generation bound in. The collision cannot occur in v2. Format-v1 objects are open-only through `legacy_v1.dart` (migration), and are reachable only with keys already authenticated by their own vault. Regression tests: `test/redteam_ssb2026_004_regression_test.dart` seals under the first tuple and requires the second to be refused by key unwrap, `ItemCrypto.open`, `rewrapItemKey`, and `sealFile`/`openFile`, in both directions, for all nine tier pairs, plus the slot and tier-export variants and the epoch dimension.
+
+## SSB-2026-003 — vault ids were not bound to a key (crypto part)
+
+- **Reported:** 2026-10-20 audit follow-up, credited to Ibnu for the review that led to it.
+- **What was wrong:** a vault id was an arbitrary string. The first sign-in for an id the server had not seen registered it, bound to whatever token arrived, and the server could not check that token because it is a hash of a key the server never sees (trust on first use). Whoever registered an id first owned it.
+- **What an attacker could do:** register ("squat") a vault id they expected someone else to use, so that the real owner's sign-in or deletion was refused or attributed to the attacker. This is an identity and availability problem for the service; it does not reveal vault contents, which stay encrypted under keys the server never holds.
+- **Fix (the part in this repository):** `OwnerIdentity` derives an Ed25519 key deterministically from the Vault Key, and a self-certifying vault id is `v2_` plus 40 hex characters of `SHA-256('ssb/v2/vault-id' || publicKey)`. A server can verify a signature over a fresh challenge and that the id is the hash of the key it was given, so an id cannot be claimed without the key. Known-answer vector: `test/vectors/owner_identity_kat.json`; tests: `test/owner_identity_test.dart`. The challenge-and-verify endpoints are server code and are not part of this repository.
+
+## SSB-2026-002 — tier keys, slots, items and manifests could be rolled back (Medium)
+
+- **Reported:** 2026-10-20 by Ibnu (with proofs of concept for seven replay and rollback cases), against format v1.
+- **What was wrong:** nothing in a v1 object said which *generation* of the vault it belonged to. A server (or a restored backup) could hand back an older wrapped tier key, an older passphrase slot, an older copy of an edited item, an older beneficiary export, or an older Beneficiary Kit share pair, and each opened cleanly.
+- **What an attacker could do:** after the owner rotated a tier key, revoked a beneficiary, changed a passphrase, edited or deleted an item, a malicious or compromised server could silently put the vault back into the earlier state. In particular it could re-admit a revoked key or beneficiary and present stale data as current. It could not decrypt anything it could not decrypt before.
+- **Fix:** format v2. Per-tier epochs and per-slot epochs are bound into every wrap context; a sealed manifest under the Vault Key records the current epochs, slot hashes, item-set hash, beneficiary-set hash and tier-export heads; a monotonic `seq` in the manifest is checked against a per-device anchor; tier exports carry `(epoch, seq, prevHash)`; Beneficiary Kits and the server share carry the epoch, so a pre-rotation Kit fails with "kit from an older key generation". Design: `CRYPTO-DESIGN.md` section 2a. Regression tests (each attack ran green against v1 and must fail against v2): `test/freshness_regression_test.dart`, `old_manifest_refused_test.dart`, `old_slot_refused_test.dart`, `cross_epoch_shares_test.dart`, `v1_v2_confusion_test.dart`, `manifest_items_hash_test.dart`, `tier_export_v2_test.dart`, `kit_v2_length_test.dart`.
+- **Residuals we document rather than hide:** the web anchor lives in `localStorage`, which can be cleared; a device that has never seen the vault cannot detect a same-epoch rollback until an owner-signed manifest head exists; files are not yet in the manifest (the app stores none today).
 
 ## SSB-2026-001 — in-flight wrap sealed a zero key when the keyring was rotated or disposed (Medium)
 

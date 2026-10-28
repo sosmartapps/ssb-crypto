@@ -62,6 +62,15 @@ abstract final class Unlock {
     if (secretKey.length != secretKeyLength || accountSalt.length != saltLength) {
       throw const SsbCryptoException('bad unlock input');
     }
+    // Tripwires (red team 2026-10-20, B6). An all-zero Secret Key is a wiped
+    // buffer, and deriving from it would quietly turn this into a
+    // passphrase-only key -- the exact failure the Secret Key exists to
+    // prevent. A zero salt is never generated either, and an empty
+    // passphrase would rest on the Secret Key alone. (The app enforces its
+    // own passphrase policy on top of this.)
+    if (isAllZero(secretKey) || isAllZero(accountSalt) || passphrase.isEmpty) {
+      throw const SsbCryptoException('bad unlock input');
+    }
     params.validateForUnlock();
     final pw = utf8Bytes(normalize ? normalizePassphrase(passphrase) : passphrase);
     // Snapshot the Secret Key and salt before the (long) Argon2 await, so a
@@ -105,23 +114,34 @@ abstract final class Unlock {
     required Argon2Params params,
     required Future<T> Function(Uint8List unlockKey) open,
   }) async {
-    final muk = await deriveUnlockKey(
-        passphrase: passphrase, secretKey: secretKey,
-        accountSalt: accountSalt, params: params);
+    // Snapshot the Secret Key and salt before the first await (see
+    // Aead.seal): the legacy-form retry below derives from them a second
+    // time, after the first derivation and the caller's open() callback have
+    // yielded, and it must see the same bytes the first attempt saw.
+    final sk = Uint8List.fromList(secretKey);
+    final salt = Uint8List.fromList(accountSalt);
     try {
-      return await open(muk);
-    } on SsbCryptoException {
-      if (!hasLegacyForm(passphrase)) rethrow;
+      final muk = await deriveUnlockKey(
+          passphrase: passphrase, secretKey: sk,
+          accountSalt: salt, params: params);
+      try {
+        return await open(muk);
+      } on SsbCryptoException {
+        if (!hasLegacyForm(passphrase)) rethrow;
+      } finally {
+        wipe(muk);
+      }
+      final legacy = await deriveUnlockKey(
+          passphrase: passphrase, secretKey: sk,
+          accountSalt: salt, params: params, normalize: false);
+      try {
+        return await open(legacy);
+      } finally {
+        wipe(legacy);
+      }
     } finally {
-      wipe(muk);
-    }
-    final legacy = await deriveUnlockKey(
-        passphrase: passphrase, secretKey: secretKey,
-        accountSalt: accountSalt, params: params, normalize: false);
-    try {
-      return await open(legacy);
-    } finally {
-      wipe(legacy);
+      wipe(sk);
+      wipe(salt);
     }
   }
 }

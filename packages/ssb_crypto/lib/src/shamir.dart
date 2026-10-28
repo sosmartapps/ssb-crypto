@@ -3,35 +3,70 @@ import 'dart:typed_data';
 import 'bytes.dart';
 import 'kdf.dart';
 
-/// A single Shamir share.
+/// A single Shamir share, wire format v2 (SSB-2026-002, design D2).
 ///
-/// Wire format: version(1) | threshold(1) | x(1) | keyCheck(8) | y(secretLen)
-/// keyCheck = HKDF(secret, "ssb/v1/share-check")[0..8] lets the combiner
-/// verify the reconstruction (catches mismatched or corrupted shares).
+///     version(1)=2 | threshold(1) | x(1) | epoch(2, u16be) | salt(8) | keyCheck(16) | y(secretLen)
 ///
-/// Caveat: keyCheck is a deterministic 64-bit function of the secret that is
-/// stored in every share. A single share therefore lets an attacker confirm
+/// For a 32-byte tier key that is [headerLength] + 32 = 61 bytes.
+///
+/// `keyCheck = HKDF-SHA384(ikm = secret, salt = salt, info = 'ssb/v2/share-check' || u16be(epoch))[0..16]`
+/// lets the combiner verify the reconstruction (catches mismatched or
+/// corrupted shares). The 8-byte [salt] is drawn once per [Shamir.split], so
+/// two independent splits of the SAME secret carry different checks: a share
+/// no longer reveals whether two kits were cut from one key (v1's unsalted
+/// 64-bit tag did, red team B5), the tag is 128 bits, and the [epoch] it is
+/// bound to cannot be rewritten without invalidating it.
+///
+/// Caveat (unchanged): keyCheck is a deterministic function of the secret
+/// that is stored in every share, so a single share lets an attacker confirm
 /// a guess of a LOW-ENTROPY secret offline. Shamir secrets MUST be uniformly
 /// random (e.g. 256-bit keys); [Shamir.split] enforces
-/// [Shamir.minSecretLength] bytes, and for a uniformly random secret the tag
-/// leaks nothing practical beyond 64 bits of a hash.
+/// [Shamir.minSecretLength] bytes.
+///
+/// Version-1 shares (43 bytes, no epoch/salt, 8-byte check) are parsed only
+/// by `ShareV1` in `package:ssb_crypto/legacy_v1.dart`; [Share.fromBytes]
+/// refuses them.
 class Share {
-  static const version = 1;
+  static const version = 2;
+  static const saltLength = 8;
+  static const keyCheckLength = 16;
+
+  /// Bytes before `y`: version, threshold, x, epoch(2), salt(8), keyCheck(16).
+  static const headerLength = 3 + 2 + saltLength + keyCheckLength;
+
+  /// Largest epoch the 2-byte field can carry.
+  static const maxEpoch = 0xffff;
+
   final int threshold;
   final int x;
+
+  /// Key generation this share belongs to (the tier epoch at split time).
+  final int epoch;
+  final Uint8List salt;
   final Uint8List keyCheck;
   final Uint8List y;
-  Share(this.threshold, this.x, this.keyCheck, this.y);
+
+  Share(this.threshold, this.x, this.epoch, this.salt, this.keyCheck, this.y);
 
   Uint8List toBytes() =>
-      concatBytes([[version, threshold, x], keyCheck, y]);
+      concatBytes([[version, threshold, x], u16be(epoch), salt, keyCheck, y]);
 
+  /// Parses a v2 share. Structural checks only: version byte 2, threshold
+  /// >= 2, x != 0, at least one byte of y. Everything else is verified when
+  /// the share is combined.
   factory Share.fromBytes(Uint8List b) {
-    if (b.length < 3 + 8 + 1 || b[0] != version || b[1] < 2 || b[2] == 0) {
+    if (b.length < headerLength + 1 || b[0] != version || b[1] < 2 || b[2] == 0) {
       throw const SsbCryptoException('invalid share');
     }
-    return Share(b[1], b[2], Uint8List.fromList(b.sublist(3, 11)),
-        Uint8List.fromList(b.sublist(11)));
+    final epoch = (b[3] << 8) | b[4];
+    return Share(
+      b[1],
+      b[2],
+      epoch,
+      Uint8List.fromList(b.sublist(5, 5 + saltLength)),
+      Uint8List.fromList(b.sublist(5 + saltLength, headerLength)),
+      Uint8List.fromList(b.sublist(headerLength)),
+    );
   }
 
   /// Wipes the share's y-values (the secret-bearing part) in place.
@@ -51,18 +86,26 @@ abstract final class Shamir {
   /// Shortest secret [split] accepts. Secrets must be uniformly random keys.
   static const minSecretLength = 16;
 
+  static const _checkInfo = 'ssb/v2/share-check';
+
+  /// Splits [secret] into [shares] shares of which [threshold] reconstruct
+  /// it, all stamped with [epoch] (0..[Share.maxEpoch]) and one fresh salt.
   static Future<List<Share>> split(Uint8List secret,
-      {int shares = 3, int threshold = 2}) async {
+      {int shares = 3, int threshold = 2, required int epoch}) async {
     if (threshold < 2 || threshold > shares || shares > 255 ||
         secret.length < minSecretLength) {
       throw const SsbCryptoException('bad shamir parameters');
+    }
+    if (epoch < 0 || epoch > Share.maxEpoch) {
+      throw const SsbCryptoException('bad epoch');
     }
     // Snapshot before the first await (see Aead.seal): a wipe of the
     // caller's buffer mid-flight must not produce consistent-looking shares
     // of a zero secret.
     final sec = Uint8List.fromList(secret);
+    final salt = randomBytes(Share.saltLength);
     try {
-      final check = await _keyCheck(sec);
+      final check = await _keyCheck(sec, salt, epoch);
       final ys = List.generate(shares, (_) => Uint8List(sec.length));
       for (var i = 0; i < sec.length; i++) {
         // Fresh random coefficients per byte: f(x) = s + c1 x + ... + c(k-1) x^(k-1)
@@ -78,23 +121,43 @@ abstract final class Shamir {
         wipe(c);
       }
       return [
-        for (var s = 0; s < shares; s++) Share(threshold, s + 1, check, ys[s])
+        for (var s = 0; s < shares; s++)
+          Share(threshold, s + 1, epoch, Uint8List.fromList(salt),
+              Uint8List.fromList(check), ys[s])
       ];
     } finally {
       wipe(sec);
     }
   }
 
+  /// Reconstructs the secret from at least `threshold` distinct shares.
+  ///
+  /// Every share must agree on threshold, y length, epoch, salt and
+  /// keyCheck (shares from another split -- a different key generation, or
+  /// an independent split of the same key -- are refused before any
+  /// arithmetic), indexes must be in 1..255 with no conflicting duplicates,
+  /// and the reconstructed secret must reproduce the keyCheck.
   static Future<Uint8List> combine(List<Share> shares) async {
     if (shares.isEmpty) throw const SsbCryptoException('not enough shares');
-    final k = shares.first.threshold;
-    final len = shares.first.y.length;
+    final first = shares.first;
+    final k = first.threshold;
+    final len = first.y.length;
+    if (first.salt.length != Share.saltLength ||
+        first.keyCheck.length != Share.keyCheckLength ||
+        first.epoch < 0 || first.epoch > Share.maxEpoch) {
+      throw const SsbCryptoException('invalid share');
+    }
+    // Snapshot the key check: it is compared after the final await (see
+    // Aead.seal). Everything else is consumed before the first await.
+    final expectedCheck = Uint8List.fromList(first.keyCheck);
     // Dedupe by share index (first occurrence wins; a repeated index with
     // different data is a conflict), then require k DISTINCT shares.
     final byX = <int, Share>{};
     for (final s in shares) {
       if (s.threshold != k || s.y.length != len || s.x < 1 || s.x > 255 ||
-          !constantTimeEquals(s.keyCheck, shares.first.keyCheck)) {
+          s.epoch != first.epoch ||
+          !constantTimeEquals(s.salt, first.salt) ||
+          !constantTimeEquals(s.keyCheck, first.keyCheck)) {
         throw const SsbCryptoException('shares do not match');
       }
       final prev = byX[s.x];
@@ -121,15 +184,20 @@ abstract final class Shamir {
       }
       out[i] = acc;
     }
-    if (!constantTimeEquals(await _keyCheck(out), shares.first.keyCheck)) {
+    if (!constantTimeEquals(
+        await _keyCheck(out, first.salt, first.epoch), expectedCheck)) {
       wipe(out);
       throw const SsbCryptoException('shares do not match');
     }
     return out;
   }
 
-  static Future<Uint8List> _keyCheck(Uint8List secret) async =>
-      (await hkdfSha384(ikm: secret, salt: const [], info: 'ssb/v1/share-check', length: 8));
+  static Future<Uint8List> _keyCheck(Uint8List secret, Uint8List salt, int epoch) =>
+      hkdfSha384Bytes(
+          ikm: secret,
+          salt: salt,
+          info: concatBytes([utf8Bytes(_checkInfo), u16be(epoch)]),
+          length: Share.keyCheckLength);
 
   /// Branch-free GF(2^8) multiply.
   static int _mul(int a, int b) {

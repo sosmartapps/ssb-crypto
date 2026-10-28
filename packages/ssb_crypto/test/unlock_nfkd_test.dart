@@ -73,20 +73,29 @@ void main() {
             normalize: normalize);
 
     /// Seals a fresh keyring's Vault Key under [p]; returns an opener.
-    Future<({String vaultId, Uint8List wrapped, Uint8List vaultKey})> seal(
+    /// (VaultKeyring.open requires every tier's wrapped key -- Phase 0, B2.)
+    final anchor = InMemoryAnchor();
+    Future<({String vaultId, Uint8List wrapped, Map<String, int> slotEpochs, Uint8List manifest,
+        Map<Tier, Uint8List> tiers, Uint8List vaultKey})> seal(
         String p, {bool legacy = false}) async {
-      final ring = VaultKeyring.create('vault-nfkd-test');
+      final ring = VaultKeyring.create('vault-nfkd-test', anchor: anchor);
       final k = await kek(p, normalize: !legacy);
-      final wrapped = await ring.wrapVaultKey(k, slot: 'unlock');
+      final wrapped = await ring.wrapVaultKey(k, slot: 'unlock', epoch: 1);
+      final tiers = {for (final t in Tier.values) t: await ring.wrapTierKey(t)};
+      final manifest = await ring.sealManifest(items: const []);
       return (
         vaultId: ring.vaultId,
         wrapped: wrapped,
+        slotEpochs: Map.of(ring.slotEpochs),
+        manifest: manifest,
+        tiers: tiers,
         vaultKey: Uint8List.fromList(ring.vaultKey),
       );
     }
 
     Future<VaultKeyring> openAs(String p,
-        ({String vaultId, Uint8List wrapped, Uint8List vaultKey}) v,
+        ({String vaultId, Uint8List wrapped, Map<String, int> slotEpochs, Uint8List manifest,
+            Map<Tier, Uint8List> tiers, Uint8List vaultKey}) v,
         {List<int>? attempts}) {
       return Unlock.openWithPassphrase(
         passphrase: p,
@@ -100,7 +109,11 @@ void main() {
               kek: k,
               slot: 'unlock',
               wrappedVaultKey: v.wrapped,
-              wrappedTierKeys: const {});
+              slotEpochs: v.slotEpochs,
+              manifestBlob: v.manifest,
+              wrappedTierKeys: v.tiers,
+              items: const [],
+              anchor: anchor);
         },
       );
     }

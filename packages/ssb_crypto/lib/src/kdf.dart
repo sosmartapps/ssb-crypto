@@ -10,16 +10,27 @@ Future<Uint8List> hkdfSha384({
   required List<int> salt,
   required String info,
   int length = 32,
+}) =>
+    hkdfSha384Bytes(ikm: ikm, salt: salt, info: utf8Bytes(info), length: length);
+
+/// [hkdfSha384] with a binary `info` (for contexts that carry fixed-width
+/// integers, e.g. the v2 Shamir key check: `'ssb/v2/share-check' || u16(epoch)`).
+Future<Uint8List> hkdfSha384Bytes({
+  required List<int> ikm,
+  required List<int> salt,
+  required List<int> info,
+  int length = 32,
 }) async {
   // package:cryptography reads SecretKeyData lazily, after an await, so the
   // input keying material is copied here before anything can wipe it.
   final k0 = Uint8List.fromList(ikm);
   final s0 = Uint8List.fromList(salt);
+  final i0 = Uint8List.fromList(info);
   try {
     final k = await Hkdf(hmac: Hmac.sha384(), outputLength: length).deriveKey(
       secretKey: SecretKeyData(k0),
       nonce: s0,
-      info: utf8Bytes(info),
+      info: i0,
     );
     return Uint8List.fromList(await k.extractBytes());
   } finally {
@@ -118,11 +129,20 @@ class Argon2Params {
 Future<Uint8List> argon2id(
     List<int> password, List<int> salt, Argon2Params p) async {
   p.validate();
-  final k = await Argon2id(
-    memory: p.memoryKiB,
-    iterations: p.iterations,
-    parallelism: p.parallelism,
-    hashLength: 32,
-  ).deriveKey(secretKey: SecretKeyData(password), nonce: salt);
-  return Uint8List.fromList(await k.extractBytes());
+  // package:cryptography reads SecretKeyData lazily, after an await, so the
+  // password and salt are copied here before anything can wipe the caller's
+  // buffers (same pattern as hkdfSha384Bytes; SSB-2026-001 residual).
+  final pw0 = Uint8List.fromList(password);
+  final salt0 = Uint8List.fromList(salt);
+  try {
+    final k = await Argon2id(
+      memory: p.memoryKiB,
+      iterations: p.iterations,
+      parallelism: p.parallelism,
+      hashLength: 32,
+    ).deriveKey(secretKey: SecretKeyData(pw0), nonce: salt0);
+    return Uint8List.fromList(await k.extractBytes());
+  } finally {
+    wipe(pw0);
+  }
 }

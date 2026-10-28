@@ -17,27 +17,29 @@ void main() {
 
   Future<Uint8List> recover({
     String v = vault, String b = bid, Tier t = Tier.secrets, String? s1, Uint8List? s2, Uint8List? sk,
-  }) =>
-      Release.recoverWithServerShare(
+  }) async =>
+      (await Release.recoverWithServerShare(
         vaultId: v, beneficiaryId: b, tier: t,
         beneficiaryKitCode: s1 ?? bundle.beneficiaryKitCode,
         sealedServerShare: s2 ?? bundle.sealedServerShare,
         beneficiarySecretKey: sk ?? ben.secretKey,
-      );
+      )).key;
+
+  Future<Uint8List> offline(String s1, String s3) async =>
+      (await Release.recoverOffline(beneficiaryKitCode: s1, attorneyKitCode: s3)).key;
 
   setUpAll(() async {
     ben = await XWing.generateKeyPair();
     attacker = await XWing.generateKeyPair();
     tierKey = randomBytes(32);
     bundle = await Release.create(vaultId: vault, beneficiaryId: bid, tier: Tier.secrets,
-        tierKey: tierKey, beneficiaryPublicKey: ben.publicKey);
+        tierKey: tierKey, beneficiaryPublicKey: ben.publicKey, epoch: 1);
   });
 
   group('release flow', () {
     test('both recovery paths return the tier key', () async {
       expect(await recover(), tierKey);
-      expect(await Release.recoverOffline(
-          beneficiaryKitCode: bundle.beneficiaryKitCode, attorneyKitCode: bundle.attorneyKitCode), tierKey);
+      expect(await offline(bundle.beneficiaryKitCode, bundle.attorneyKitCode), tierKey);
     });
 
     test('binding of vault id, beneficiary id, tier, secret key', () async {
@@ -55,17 +57,17 @@ void main() {
 
     test('KEY SUBSTITUTION: server swaps in its own pubkey -> legit beneficiary cannot recover, attacker cannot either', () async {
       final evil = await Release.create(vaultId: vault, beneficiaryId: bid, tier: Tier.secrets,
-          tierKey: tierKey, beneficiaryPublicKey: attacker.publicKey);
+          tierKey: tierKey, beneficiaryPublicKey: attacker.publicKey, epoch: 1);
       final f = Fails();
       // S2 sealed to the attacker is unreadable to the real beneficiary.
       await f.mustFail('real ben opens evil S2', () => recover(s2: evil.sealedServerShare));
       // Attacker opens S2 with own key but cannot combine S2 alone or with a wrong S1.
       final s2 = Share.fromBytes(await Hpke.open(attacker.secretKey, evil.sealedServerShare,
-          info: Release.s2Info(vault, bid, Tier.secrets)));
+          info: Release.s2Info(vault, bid, Tier.secrets, epoch: 1)));
       await f.mustFail('attacker S2 alone', () => Shamir.combine([s2]));
       await f.mustFail('attacker S2 + guessed S1', () async {
         final guess = await Release.create(vaultId: vault, beneficiaryId: bid, tier: Tier.secrets,
-            tierKey: randomBytes(32), beneficiaryPublicKey: attacker.publicKey);
+            tierKey: randomBytes(32), beneficiaryPublicKey: attacker.publicKey, epoch: 1);
         return Release.recoverWithServerShare(vaultId: vault, beneficiaryId: bid, tier: Tier.secrets,
             beneficiaryKitCode: guess.beneficiaryKitCode, sealedServerShare: evil.sealedServerShare,
             beneficiarySecretKey: attacker.secretKey);
@@ -74,24 +76,31 @@ void main() {
     });
 
     test('REPLAY: old S2 / old S1 against a rotated tier key never yields the new key', () async {
+      // A rotation is a new key AND a new epoch (design D1/D10).
       final newKey = randomBytes(32);
       final fresh = await Release.create(vaultId: vault, beneficiaryId: bid, tier: Tier.secrets,
-          tierKey: newKey, beneficiaryPublicKey: ben.publicKey);
+          tierKey: newKey, beneficiaryPublicKey: ben.publicKey, epoch: 2);
       final f = Fails();
       await f.mustFail('old S2 + new S1', () => recover(s1: fresh.beneficiaryKitCode));
       await f.mustFail('new S2 + old S1', () => recover(s2: fresh.sealedServerShare));
-      await f.mustFail('old S1 + new S3', () => Release.recoverOffline(
-          beneficiaryKitCode: bundle.beneficiaryKitCode, attorneyKitCode: fresh.attorneyKitCode));
-      await f.mustFail('new S1 + old S3', () => Release.recoverOffline(
-          beneficiaryKitCode: fresh.beneficiaryKitCode, attorneyKitCode: bundle.attorneyKitCode));
+      await f.mustFail('old S1 + new S3', () => offline(bundle.beneficiaryKitCode, fresh.attorneyKitCode));
+      await f.mustFail('new S1 + old S3', () => offline(fresh.beneficiaryKitCode, bundle.attorneyKitCode));
       f.done();
-      // Old material still opens only the OLD key (replay yields nothing new).
-      final old = await recover();
-      expect(old, tierKey);
-      expect(old, isNot(newKey));
+      // Old material still reconstructs only the OLD key -- ciphertext cannot
+      // be unsent (SSB-2026-002 F1, inherent) -- but it now says WHICH
+      // generation it is, so a recovery tool can refuse it against a newer
+      // export (see cross_epoch_shares_test / freshness_regression_test).
+      final old = await Release.recoverWithServerShare(vaultId: vault, beneficiaryId: bid, tier: Tier.secrets,
+          beneficiaryKitCode: bundle.beneficiaryKitCode, sealedServerShare: bundle.sealedServerShare,
+          beneficiarySecretKey: ben.secretKey);
+      expect(old.key, tierKey);
+      expect(old.key, isNot(newKey));
+      expect(old.epoch, 1);
+      expect(fresh.epoch, 2);
       // ...and that old key cannot open items sealed under the rotated key.
-      final it = await ItemCrypto.seal(vaultId: vault, tier: Tier.secrets, tierKey: newKey, itemId: 'i', plaintext: rnd(r, 10));
-      await expectLater(ItemCrypto.open(vaultId: vault, tierKey: old, item: it), throwsA(isA<SsbCryptoException>()));
+      final it = await ItemCrypto.seal(vaultId: vault, tier: Tier.secrets, tierKey: newKey, tierEpoch: 2, itemId: 'i', plaintext: rnd(r, 10));
+      await expectLater(ItemCrypto.open(vaultId: vault, tierKey: old.key, tierEpoch: 2, item: it), throwsA(isA<SsbCryptoException>()));
+      await expectLater(ItemCrypto.open(vaultId: vault, tierKey: old.key, tierEpoch: 1, item: it), throwsA(isA<SsbCryptoException>()));
     });
 
     test('every byte of the sealed server share (S2) is authenticated', () async {
@@ -110,10 +119,8 @@ void main() {
       final f = Fails();
       final alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
       await f.mustFail('S3 as S1', () => recover(s1: bundle.attorneyKitCode));
-      await f.mustFail('S1 as S3', () => Release.recoverOffline(
-          beneficiaryKitCode: bundle.attorneyKitCode, attorneyKitCode: bundle.beneficiaryKitCode));
-      await f.mustFail('S1+S1', () => Release.recoverOffline(
-          beneficiaryKitCode: bundle.beneficiaryKitCode, attorneyKitCode: bundle.beneficiaryKitCode));
+      await f.mustFail('S1 as S3', () => offline(bundle.attorneyKitCode, bundle.beneficiaryKitCode));
+      await f.mustFail('S1+S1', () => offline(bundle.beneficiaryKitCode, bundle.beneficiaryKitCode));
       await f.mustFail('recovery-key label', () => VaultKeyring.parseRecoveryKey(bundle.beneficiaryKitCode));
       await f.mustFail('secret-key label', () => Unlock.parseSecretKey(bundle.beneficiaryKitCode));
       final code = bundle.beneficiaryKitCode;
@@ -132,11 +139,12 @@ void main() {
     });
 
     test('FINDING-CANDIDATE: S2 info string is unambiguous across (vaultId, beneficiaryId)', () async {
-      // info = "ssb/v1/s2|vault:$v|beneficiary:$b|tier:$t" with no escaping or
-      // length prefixes: ids containing the delimiters can collide.
+      // v1 info was "ssb/v1/s2|vault:$v|beneficiary:$b|tier:$t" with no
+      // escaping or length prefixes: ids containing the delimiters could
+      // collide. v2 length-prefixes every field.
       final b2 = await Release.create(
           vaultId: 'x|beneficiary:y', beneficiaryId: 'z', tier: Tier.ice,
-          tierKey: tierKey, beneficiaryPublicKey: ben.publicKey);
+          tierKey: tierKey, beneficiaryPublicKey: ben.publicKey, epoch: 1);
       await expectLater(
           Release.recoverWithServerShare(
               vaultId: 'x', beneficiaryId: 'y|beneficiary:z', tier: Tier.ice,
@@ -148,10 +156,10 @@ void main() {
 
     test('FINDING-CANDIDATE: item AEAD contexts are unambiguous across (vaultId, itemId)', () async {
       final tk = randomBytes(32);
-      final it = await ItemCrypto.seal(vaultId: 'x|tier:ice|item:y', tier: Tier.ice, tierKey: tk, itemId: 'z', plaintext: rnd(r, 8));
+      final it = await ItemCrypto.seal(vaultId: 'x|tier:ice|item:y', tier: Tier.ice, tierKey: tk, tierEpoch: 1, itemId: 'z', plaintext: rnd(r, 8));
       // same bytes, re-labelled with the id boundary moved
       await expectLater(
-          ItemCrypto.open(vaultId: 'x', tierKey: tk, item: SealedItem('y|tier:ice|item:z', Tier.ice, it.wrappedItemKey, it.body)),
+          ItemCrypto.open(vaultId: 'x', tierKey: tk, tierEpoch: 1, item: SealedItem('y|tier:ice|item:z', Tier.ice, it.wrappedItemKey, it.body)),
           throwsA(isA<SsbCryptoException>()),
           reason: 'item for vault "x|tier:ice|item:y"/"z" accepted as vault "x"/"y|tier:ice|item:z"');
     });

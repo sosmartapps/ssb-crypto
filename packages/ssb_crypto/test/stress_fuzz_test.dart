@@ -20,7 +20,7 @@ void main() {
       final f = Fails();
       for (var i = 0; i < 3000; i++) {
         final b = rnd(r, r.nextInt(80));
-        final valid = b.length >= 12 && b[0] == 1 && b[1] >= 2 && b[2] != 0;
+        final valid = b.length >= Share.headerLength + 1 && b[0] == 2 && b[1] >= 2 && b[2] != 0;
         try {
           final s = Share.fromBytes(b);
           f.check(valid, 'accepted structurally invalid share ${hexEncode(b)}');
@@ -38,8 +38,8 @@ void main() {
       final f = Fails();
       for (var i = 0; i < 300; i++) {
         final len = 1 + r.nextInt(40);
-        final a = Share(2, 1 + r.nextInt(3), rnd(r, 8), rnd(r, len));
-        final b = Share(2, 1 + r.nextInt(3), a.keyCheck, rnd(r, len));
+        final a = Share(2, 1 + r.nextInt(3), r.nextInt(0x10000), rnd(r, 8), rnd(r, 16), rnd(r, len));
+        final b = Share(2, 1 + r.nextInt(3), a.epoch, a.salt, a.keyCheck, rnd(r, len));
         await f.mustFail('random shares', () => Shamir.combine([a, b]));
       }
       f.done();
@@ -175,14 +175,34 @@ void main() {
       }
     });
 
-    test('VaultKeyring.open / fromVaultKey / ItemCrypto.open / openFile with junk', () async {
+    test('VaultKeyring.open / fromVaultKey / ItemCrypto.open / openFile / manifest / tier export with junk', () async {
       final f = Fails();
+      final anchor = InMemoryAnchor();
+      final ring = VaultKeyring.create('V', anchor: anchor);
+      final wvk = await ring.wrapVaultKey(key, slot: 'unlock', epoch: 1);
+      final wtk = {for (final t in Tier.values) t: await ring.wrapTierKey(t)};
+      final manifest = await ring.sealManifest(items: const []);
       for (var i = 0; i < 300; i++) {
         final junk = rnd(r, r.nextInt(150));
-        await f.mustFail('ring', () => VaultKeyring.open(vaultId: 'V', kek: key, slot: 'unlock', wrappedVaultKey: junk, wrappedTierKeys: {}));
-        await f.mustFail('fromVaultKey', () => VaultKeyring.fromVaultKey(vaultId: 'V', vaultKey: key, wrappedTierKeys: {Tier.ice: junk}));
-        await f.mustFail('item', () => ItemCrypto.open(vaultId: 'V', tierKey: key, item: SealedItem('i', Tier.ice, junk, junk)));
-        await f.mustFail('file', () => ItemCrypto.openFile(vaultId: 'V', tier: Tier.ice, tierKey: key, fileId: 'f', wrappedKey: junk, stream: junk));
+        final all = {for (final t in Tier.values) t: junk};
+        await f.mustFail('ring vk', () => VaultKeyring.open(vaultId: 'V', kek: key, slot: 'unlock', wrappedVaultKey: junk,
+            slotEpochs: ring.slotEpochs, manifestBlob: manifest, wrappedTierKeys: wtk, items: const [], anchor: anchor));
+        await f.mustFail('ring manifest', () => VaultKeyring.open(vaultId: 'V', kek: key, slot: 'unlock', wrappedVaultKey: wvk,
+            slotEpochs: ring.slotEpochs, manifestBlob: junk, wrappedTierKeys: wtk, items: const [], anchor: anchor));
+        await f.mustFail('ring tiers', () => VaultKeyring.open(vaultId: 'V', kek: key, slot: 'unlock', wrappedVaultKey: wvk,
+            slotEpochs: ring.slotEpochs, manifestBlob: manifest, wrappedTierKeys: all, items: const [], anchor: anchor));
+        await f.mustFail('ring partial', () => VaultKeyring.open(vaultId: 'V', kek: key, slot: 'unlock', wrappedVaultKey: wvk,
+            slotEpochs: ring.slotEpochs, manifestBlob: manifest, wrappedTierKeys: {}, items: const [], anchor: anchor));
+        await f.mustFail('fromVaultKey', () => VaultKeyring.fromVaultKey(vaultId: 'V', vaultKey: ring.vaultKey, manifestBlob: manifest,
+            wrappedTierKeys: {Tier.ice: junk}, items: const [], anchor: anchor));
+        await f.mustFail('fromVaultKey manifest', () => VaultKeyring.fromVaultKey(vaultId: 'V', vaultKey: ring.vaultKey, manifestBlob: junk,
+            wrappedTierKeys: wtk, items: const [], anchor: anchor));
+        await f.mustFail('item', () => ItemCrypto.open(vaultId: 'V', tierKey: key, tierEpoch: 1, item: SealedItem('i', Tier.ice, junk, junk)));
+        await f.mustFail('file', () => ItemCrypto.openFile(vaultId: 'V', tier: Tier.ice, tierKey: key, tierEpoch: 1, fileId: 'f', wrappedKey: junk, stream: junk));
+        await f.mustFail('manifest', () => VaultManifest.open(key, junk, vaultId: 'V'));
+        await f.mustFail('manifest decode', () async => VaultManifest.decode(junk));
+        await f.mustFail('tier export', () => TierExportCrypto.open(vaultId: 'V', tier: Tier.ice, tierKey: key,
+            header: TierExportHeader(epoch: 1, seq: 1, prevHash: Uint8List(32)), ciphertext: junk));
       }
       f.done();
     });
@@ -193,16 +213,16 @@ void main() {
       for (var i = 0; i < 200; i++) {
         await f.mustFail('server', () => Release.recoverWithServerShare(
             vaultId: 'V', beneficiaryId: 'B', tier: Tier.ice,
-            beneficiaryKitCode: rndCode('SSB1-BK', r.nextInt(100)),
+            beneficiaryKitCode: rndCode('SSB2-BK', r.nextInt(120)),
             sealedServerShare: rnd(r, r.nextInt(1300)),
             beneficiarySecretKey: kp.secretKey));
         await f.mustFail('offline', () => Release.recoverOffline(
-            beneficiaryKitCode: rndCode('SSB1-BK', 70), attorneyKitCode: rndCode('SSB1-AK', 70)));
+            beneficiaryKitCode: rndCode('SSB2-BK', 104), attorneyKitCode: rndCode('SSB2-AK', 104)));
       }
       await f.mustFail('create pk len', () => Release.create(vaultId: 'V', beneficiaryId: 'B', tier: Tier.ice,
-          tierKey: randomBytes(32), beneficiaryPublicKey: Uint8List(10)));
+          tierKey: randomBytes(32), beneficiaryPublicKey: Uint8List(10), epoch: 1));
       await f.mustFail('create empty tier key', () => Release.create(vaultId: 'V', beneficiaryId: 'B', tier: Tier.ice,
-          tierKey: Uint8List(0), beneficiaryPublicKey: kp.publicKey));
+          tierKey: Uint8List(0), beneficiaryPublicKey: kp.publicKey, epoch: 1));
       f.done();
     });
 

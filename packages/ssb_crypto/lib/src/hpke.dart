@@ -24,6 +24,9 @@ abstract final class Hpke {
   /// Seal [plaintext] to [recipientPublicKey]. Returns enc(1120) || ciphertext.
   static Future<Uint8List> seal(Uint8List recipientPublicKey, Uint8List plaintext,
       {List<int> info = const [], List<int> aad = const []}) async {
+    // A zero / zero-half recipient key would make this ciphertext public
+    // (B1); refuse before touching the plaintext.
+    XWing.validatePublicKey(recipientPublicKey);
     // Snapshot every caller-owned input before the first await (see
     // Aead.seal). encapsulate() and keySchedule() both await before the
     // plaintext is touched.
@@ -56,7 +59,9 @@ abstract final class Hpke {
     if (sealed.length < XWing.ciphertextLength + 16) {
       throw const SsbCryptoException('decrypt failed');
     }
-    final enc = Uint8List.sublistView(sealed, 0, XWing.ciphertextLength);
+    // Snapshot the sealed value too: its body is read after the awaits below.
+    final blob = Uint8List.fromList(sealed);
+    final enc = Uint8List.sublistView(blob, 0, XWing.ciphertextLength);
     final inf = Uint8List.fromList(info);
     final ad = Uint8List.fromList(aad);
     final ss = await XWing.decapsulate(Uint8List.fromList(enc), recipientSecretKey);
@@ -67,7 +72,7 @@ abstract final class Hpke {
     } finally {
       wipe(ss);
     }
-    final body = Uint8List.sublistView(sealed, XWing.ciphertextLength);
+    final body = Uint8List.sublistView(blob, XWing.ciphertextLength);
     try {
       final pt = await _gcm.decrypt(
           SecretBox(body.sublist(0, body.length - 16),
@@ -86,17 +91,28 @@ abstract final class Hpke {
   static Future<HpkeKeySchedule> keySchedule(List<int> sharedSecret, List<int> info,
       {required int kemId, required int kdfId, required int aeadId}) async {
     final suiteId = concatBytes([utf8Bytes('HPKE'), u16be(kemId), u16be(kdfId), u16be(aeadId)]);
-    final pskIdHash = await _labeledExtract(suiteId, const [], 'psk_id_hash', const []);
-    final infoHash = await _labeledExtract(suiteId, const [], 'info_hash', info);
-    final context = concatBytes([[0x00], pskIdHash, infoHash]);
-    final secret = await _labeledExtract(suiteId, sharedSecret, 'secret', const []);
+    // Snapshot both caller buffers before the first await (see Aead.seal).
+    // `info` is read at the second await and `sharedSecret` at the third;
+    // a caller that wipes or overwrites either one while this call is
+    // pending must not be able to change the schedule that comes out.
+    final ss = Uint8List.fromList(sharedSecret);
+    final inf = Uint8List.fromList(info);
     try {
-      final key = await _labeledExpand(suiteId, secret, 'key', context, _nk);
-      final nonce = await _labeledExpand(suiteId, secret, 'base_nonce', context, _nn);
-      final exporter = await _labeledExpand(suiteId, secret, 'exp', context, _nh);
-      return HpkeKeySchedule(key, nonce, exporter, context);
+      final pskIdHash = await _labeledExtract(suiteId, const [], 'psk_id_hash', const []);
+      final infoHash = await _labeledExtract(suiteId, const [], 'info_hash', inf);
+      final context = concatBytes([[0x00], pskIdHash, infoHash]);
+      final secret = await _labeledExtract(suiteId, ss, 'secret', const []);
+      try {
+        final key = await _labeledExpand(suiteId, secret, 'key', context, _nk);
+        final nonce = await _labeledExpand(suiteId, secret, 'base_nonce', context, _nn);
+        final exporter = await _labeledExpand(suiteId, secret, 'exp', context, _nh);
+        return HpkeKeySchedule(key, nonce, exporter, context);
+      } finally {
+        wipe(secret);
+      }
     } finally {
-      wipe(secret);
+      wipe(ss);
+      wipe(inf);
     }
   }
 

@@ -25,7 +25,7 @@ void main() {
         final wrapped = await pending;
         final pt = await Aead.open(kr.vaultKey, wrapped,
             type: ObjectType.wrappedKey,
-            context: utf8Bytes('ssb/v1/tk/ice|vault:vault-A'));
+            context: VaultKeyring.tkContext('vault-A', Tier.ice, 1));
         expect(_allZero(pt), isFalse, reason: 'trial $trial sealed a zero key');
         expect(pt, equals(oldTk));
       }
@@ -42,7 +42,7 @@ void main() {
       // the wipe either) and yield the original tier key.
       final pt = await Aead.open(vk, wrapped,
           type: ObjectType.wrappedKey,
-          context: utf8Bytes('ssb/v1/tk/secrets|vault:vault-B'));
+          context: VaultKeyring.tkContext('vault-B', Tier.secrets, 1));
       expect(pt, equals(tk));
     });
 
@@ -50,12 +50,12 @@ void main() {
       final kr = VaultKeyring.create('vault-C');
       final vk = _copy(kr.vaultKey);
       final kek = randomBytes(32);
-      final pending = kr.wrapVaultKey(kek, slot: 'unlock');
+      final pending = kr.wrapVaultKey(kek, slot: 'unlock', epoch: 1);
       kr.dispose();
       final wrapped = await pending;
       final pt = await Aead.open(kek, wrapped,
           type: ObjectType.wrappedKey,
-          context: utf8Bytes('ssb/v1/vk/unlock|vault:vault-C'));
+          context: VaultKeyring.vkContext('vault-C', 'unlock', 1));
       expect(pt, equals(vk));
     });
 
@@ -87,15 +87,29 @@ void main() {
     });
 
     test('end to end: a raced rotation can no longer plant a zero tier key', () async {
-      final kr = VaultKeyring.create('vault-X');
+      final anchor = InMemoryAnchor();
+      final kr = VaultKeyring.create('vault-X', anchor: anchor);
       final vk = _copy(kr.vaultKey);
       final stored = {for (final t in Tier.values) t: await kr.wrapTierKey(t)};
       final pending = kr.wrapTierKey(Tier.ice);
       kr.rotateTier(Tier.ice);
-      stored[Tier.ice] = await pending;
+      final racedWrap = await pending; // sealed the OLD key under the OLD epoch
+      // Format v2 adds a second line of defence: the manifest now says ice is
+      // at epoch 2, so the raced (epoch-1) wrap is refused outright instead
+      // of being accepted as a zero key...
+      final manifest = await kr.sealManifest(items: const []);
+      await expectLater(VaultKeyring.fromVaultKey(vaultId: 'vault-X', vaultKey: vk, manifestBlob: manifest,
+          wrappedTierKeys: {...stored, Tier.ice: racedWrap}, items: const [], anchor: anchor),
+          throwsA(isA<SsbCryptoException>()));
+      // ...and the wrap the client should have stored (post-rotation) opens.
+      stored[Tier.ice] = await kr.wrapTierKey(Tier.ice);
       final reopened = await VaultKeyring.fromVaultKey(
-          vaultId: 'vault-X', vaultKey: vk, wrappedTierKeys: stored);
+          vaultId: 'vault-X', vaultKey: vk, manifestBlob: manifest, wrappedTierKeys: stored, items: const [], anchor: anchor);
       expect(_allZero(reopened.tierKeys[Tier.ice]!), isFalse);
+      expect(reopened.tierKeys[Tier.ice], kr.tierKeys[Tier.ice]);
+      // The raced wrap itself still holds the real old key, never zeros.
+      final pt = await Aead.open(vk, racedWrap, type: ObjectType.wrappedKey, context: VaultKeyring.tkContext('vault-X', Tier.ice, 1));
+      expect(_allZero(pt), isFalse);
     });
   });
 
@@ -104,39 +118,39 @@ void main() {
       final tk1 = randomBytes(32), tk2 = randomBytes(32);
       final tk2Copy = _copy(tk2);
       final item = await ItemCrypto.seal(
-          vaultId: 'v', tier: Tier.ice, tierKey: tk1, itemId: 'i', plaintext: utf8Bytes('x'));
+          vaultId: 'v', tier: Tier.ice, tierKey: tk1, tierEpoch: 1, itemId: 'i', plaintext: utf8Bytes('x'));
       final pending = ItemCrypto.rewrapItemKey(
-          vaultId: 'v', item: item, oldTierKey: tk1, newTier: Tier.ice, newTierKey: tk2);
+          vaultId: 'v', item: item, oldTierKey: tk1, oldTierEpoch: 1, newTier: Tier.ice, newTierKey: tk2, newTierEpoch: 2);
       wipe(tk2); // lands during the unwrap await
       final re = await pending;
-      expect(await ItemCrypto.open(vaultId: 'v', tierKey: tk2Copy, item: re), equals(utf8Bytes('x')));
+      expect(await ItemCrypto.open(vaultId: 'v', tierKey: tk2Copy, tierEpoch: 2, item: re), equals(utf8Bytes('x')));
     });
 
     test('ItemCrypto.seal / sealFile snapshot the plaintext (audit F4)', () async {
       final tk = randomBytes(32);
       final pt = utf8Bytes('hello world');
       final pending = ItemCrypto.seal(
-          vaultId: 'v', tier: Tier.ice, tierKey: tk, itemId: 'i', plaintext: pt);
+          vaultId: 'v', tier: Tier.ice, tierKey: tk, tierEpoch: 1, itemId: 'i', plaintext: pt);
       wipe(pt);
       final item = await pending;
-      expect(await ItemCrypto.open(vaultId: 'v', tierKey: tk, item: item), equals(utf8Bytes('hello world')));
+      expect(await ItemCrypto.open(vaultId: 'v', tierKey: tk, tierEpoch: 1, item: item), equals(utf8Bytes('hello world')));
 
       final data = randomBytes(5000);
       final dataCopy = _copy(data);
       final pendingFile = ItemCrypto.sealFile(
-          vaultId: 'v', tier: Tier.ice, tierKey: tk, fileId: 'f', data: data);
+          vaultId: 'v', tier: Tier.ice, tierKey: tk, tierEpoch: 1, fileId: 'f', data: data);
       wipe(data);
       final (wk, stream) = await pendingFile;
       expect(
           await ItemCrypto.openFile(
-              vaultId: 'v', tier: Tier.ice, tierKey: tk, fileId: 'f', wrappedKey: wk, stream: stream),
+              vaultId: 'v', tier: Tier.ice, tierKey: tk, tierEpoch: 1, fileId: 'f', wrappedKey: wk, stream: stream),
           equals(dataCopy));
     });
 
     test('Shamir.split and Release.create snapshot the secret (audit F2)', () async {
       final secret = randomBytes(32);
       final secretCopy = _copy(secret);
-      final pending = Shamir.split(secret);
+      final pending = Shamir.split(secret, epoch: 1);
       wipe(secret);
       final shares = await pending;
       expect(await Shamir.combine([shares[0], shares[2]]), equals(secretCopy));
@@ -146,12 +160,12 @@ void main() {
       final kp = await XWing.generateKeyPair();
       final pendingRelease = Release.create(
           vaultId: 'v', beneficiaryId: 'b', tier: Tier.secrets,
-          tierKey: tk, beneficiaryPublicKey: kp.publicKey);
+          tierKey: tk, beneficiaryPublicKey: kp.publicKey, epoch: 1);
       wipe(tk);
       final bundle = await pendingRelease;
       expect(
-          await Release.recoverOffline(
-              beneficiaryKitCode: bundle.beneficiaryKitCode, attorneyKitCode: bundle.attorneyKitCode),
+          (await Release.recoverOffline(
+              beneficiaryKitCode: bundle.beneficiaryKitCode, attorneyKitCode: bundle.attorneyKitCode)).key,
           equals(tkCopy));
     });
 
@@ -213,7 +227,9 @@ void main() {
       expect(() => kr.tierKey(Tier.ice), throwsA(isA<SsbCryptoException>()));
       expect(() => kr.rotateTier(Tier.ice), throwsA(isA<SsbCryptoException>()));
       expect(() => kr.wrapTierKey(Tier.ice), throwsA(isA<SsbCryptoException>()));
-      expect(() => kr.wrapVaultKey(randomBytes(32), slot: 's'), throwsA(isA<SsbCryptoException>()));
+      expect(() => kr.wrapVaultKey(randomBytes(32), slot: 's', epoch: 1), throwsA(isA<SsbCryptoException>()));
+      expect(() => kr.sealManifest(items: const []), throwsA(isA<SsbCryptoException>()));
+      expect(() => kr.sealTierExport(Tier.ice, Uint8List(1)), throwsA(isA<SsbCryptoException>()));
     });
 
     test('an all-zero key is rejected by Aead and StreamCipher (tripwire)', () async {
@@ -226,10 +242,10 @@ void main() {
       // ...so re-wrapping under a wiped tier key fails instead of succeeding.
       final tk1 = randomBytes(32);
       final item = await ItemCrypto.seal(
-          vaultId: 'v', tier: Tier.ice, tierKey: tk1, itemId: 'i', plaintext: utf8Bytes('x'));
+          vaultId: 'v', tier: Tier.ice, tierKey: tk1, tierEpoch: 1, itemId: 'i', plaintext: utf8Bytes('x'));
       await expectLater(
           ItemCrypto.rewrapItemKey(
-              vaultId: 'v', item: item, oldTierKey: tk1, newTier: Tier.ice, newTierKey: zero),
+              vaultId: 'v', item: item, oldTierKey: tk1, oldTierEpoch: 1, newTier: Tier.ice, newTierKey: zero, newTierEpoch: 1),
           throwsA(isA<SsbCryptoException>()));
     });
 
@@ -244,22 +260,24 @@ void main() {
     test('rewrapItemKey returns a body that is not the input buffer', () async {
       final tk1 = randomBytes(32), tk2 = randomBytes(32);
       final item = await ItemCrypto.seal(
-          vaultId: 'v', tier: Tier.ice, tierKey: tk1, itemId: 'i',
+          vaultId: 'v', tier: Tier.ice, tierKey: tk1, tierEpoch: 1, itemId: 'i',
           plaintext: utf8Bytes('hello'));
       final re = await ItemCrypto.rewrapItemKey(
-          vaultId: 'v', item: item, oldTierKey: tk1, newTier: Tier.ice, newTierKey: tk2);
+          vaultId: 'v', item: item, oldTierKey: tk1, oldTierEpoch: 1, newTier: Tier.ice, newTierKey: tk2, newTierEpoch: 1);
       expect(identical(re.body, item.body), isFalse);
       wipe(item.body); // "wiping the old item" must not destroy the new one
-      final pt = await ItemCrypto.open(vaultId: 'v', tierKey: tk2, item: re);
+      final pt = await ItemCrypto.open(vaultId: 'v', tierKey: tk2, tierEpoch: 1, item: re);
       expect(pt, equals(utf8Bytes('hello')));
     });
 
     test('fromVaultKey copies the vault key, so dispose() cannot zero the caller buffer', () async {
-      final kr = VaultKeyring.create('v');
+      final anchor = InMemoryAnchor();
+      final kr = VaultKeyring.create('v', anchor: anchor);
       final wrapped = {for (final t in Tier.values) t: await kr.wrapTierKey(t)};
+      final manifest = await kr.sealManifest(items: const []);
       final callerVk = _copy(kr.vaultKey);
       final kr2 = await VaultKeyring.fromVaultKey(
-          vaultId: 'v', vaultKey: callerVk, wrappedTierKeys: wrapped);
+          vaultId: 'v', vaultKey: callerVk, manifestBlob: manifest, wrappedTierKeys: wrapped, items: const [], anchor: anchor);
       expect(identical(kr2.vaultKey, callerVk), isFalse);
       kr2.dispose();
       expect(callerVk, equals(kr.vaultKey));
@@ -268,17 +286,20 @@ void main() {
 
   group('failure paths still fail closed', () {
     test('VaultKeyring.open with one corrupt tier wrap throws (and leaks nothing it can reach)', () async {
-      final kr = VaultKeyring.create('v');
+      final anchor = InMemoryAnchor();
+      final kr = VaultKeyring.create('v', anchor: anchor);
       final kek = randomBytes(32);
-      final wvk = await kr.wrapVaultKey(kek, slot: 'unlock');
+      final wvk = await kr.wrapVaultKey(kek, slot: 'unlock', epoch: 1);
       final wrapped = {for (final t in Tier.values) t: await kr.wrapTierKey(t)};
+      final manifest = await kr.sealManifest(items: const []);
       final bad = _copy(wrapped[Tier.secrets]!);
       bad[bad.length - 1] ^= 1;
       wrapped[Tier.secrets] = bad;
       expect(
         () => VaultKeyring.open(
             vaultId: 'v', kek: kek, slot: 'unlock',
-            wrappedVaultKey: wvk, wrappedTierKeys: wrapped),
+            wrappedVaultKey: wvk, slotEpochs: kr.slotEpochs, manifestBlob: manifest,
+            wrappedTierKeys: wrapped, items: const [], anchor: anchor),
         throwsA(isA<SsbCryptoException>()),
       );
     });
@@ -288,10 +309,11 @@ void main() {
       final kp = await XWing.generateKeyPair();
       final b = await Release.create(
           vaultId: 'v', beneficiaryId: 'b', tier: Tier.essentials,
-          tierKey: tk, beneficiaryPublicKey: kp.publicKey);
+          tierKey: tk, beneficiaryPublicKey: kp.publicKey, epoch: 1);
       final got = await Release.recoverOffline(
           beneficiaryKitCode: b.beneficiaryKitCode, attorneyKitCode: b.attorneyKitCode);
-      expect(got, equals(tk));
+      expect(got.key, equals(tk));
+      expect(got.epoch, 1);
       expect(
         () => Release.recoverOffline(
             beneficiaryKitCode: b.beneficiaryKitCode, attorneyKitCode: b.beneficiaryKitCode),

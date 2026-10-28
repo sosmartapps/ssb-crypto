@@ -19,12 +19,20 @@ abstract final class SafetyNumber {
   static Future<Uint8List> fingerprint(
       {required String beneficiaryId, required Uint8List publicKey}) async {
     final id = utf8Bytes(beneficiaryId);
-    var h = concatBytes([u16be(1), utf8Bytes('ssb/v1/safety'), u16be(id.length), id, publicKey]);
-    final sha = Sha512();
-    for (var i = 0; i < _iterations; i++) {
-      h = Uint8List.fromList((await sha.hash(concatBytes([h, publicKey]))).bytes);
+    // Snapshot the key before the first await (see Aead.seal): it is mixed
+    // into every one of the 5200 rounds, so a caller that overwrites its
+    // buffer mid-computation must not be able to change the number.
+    final pk = Uint8List.fromList(publicKey);
+    try {
+      var h = concatBytes([u16be(1), utf8Bytes('ssb/v1/safety'), u16be(id.length), id, pk]);
+      final sha = Sha512();
+      for (var i = 0; i < _iterations; i++) {
+        h = Uint8List.fromList((await sha.hash(concatBytes([h, pk]))).bytes);
+      }
+      return Uint8List.fromList(h.sublist(0, 30));
+    } finally {
+      wipe(pk);
     }
-    return Uint8List.fromList(h.sublist(0, 30));
   }
 
   /// "12345 67890 ..." (60 digits).

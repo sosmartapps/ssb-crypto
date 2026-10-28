@@ -8,10 +8,16 @@ import 'suite.dart';
 /// AES-256-GCM with a versioned header (spec §6.2).
 ///
 /// Output: header(6) | nonce(12) | ciphertext | tag(16)
-/// AAD:    header | caller context (e.g. `vault:ID/item:ID`)
+/// AAD:    header | caller context (a `ctx2(...)` value for format v2)
 ///
 /// Every item has its own random key, so random 96-bit nonces stay far
 /// below the GCM per-key usage limits.
+///
+/// Format versions: [seal] always writes [Suite.formatVersion] (2) and
+/// [open] accepts only that. Objects written by the previous format are
+/// opened through [openLegacyV1] alone, which in turn accepts only version
+/// byte 1 -- the two never overlap, so a v1 blob cannot be presented as a
+/// v2 one or vice versa (SSB-2026-002, design D8).
 abstract final class Aead {
   static final AesGcm _gcm = AesGcm.with256bits();
   static const keyLength = 32;
@@ -35,7 +41,9 @@ abstract final class Aead {
       throw const SsbCryptoException('bad nonce');
     }
     final header = buildHeader(type);
-    final n = nonce ?? randomBytes(nonceLength);
+    // A caller-supplied nonce is copied too: it is written into the output
+    // after the cipher has yielded.
+    final n = nonce == null ? randomBytes(nonceLength) : Uint8List.fromList(nonce);
     // Snapshot every input BEFORE the first await. An async body runs
     // synchronously only up to its first await; a caller that wipes or
     // rotates its buffer while this call is pending (rotateTier()/dispose()
@@ -59,29 +67,56 @@ abstract final class Aead {
     }
   }
 
+  /// Opens a format-v2 object. A blob whose header carries any other format
+  /// version (a v1 object included) fails with `decrypt failed`.
   static Future<Uint8List> open(
     Uint8List key,
     Uint8List blob, {
     required ObjectType type,
     List<int> context = const [],
+  }) =>
+      _open(key, blob, type: type, context: context, formatVersion: Suite.formatVersion);
+
+  /// Opens a format-v1 object (header version byte 1) and nothing else.
+  ///
+  /// For the v1 -> v2 migration and `package:ssb_crypto/legacy_v1.dart`
+  /// only. The caller supplies the v1 context string; this method does not
+  /// know or check what the context means, it only refuses non-v1 headers.
+  static Future<Uint8List> openLegacyV1(
+    Uint8List key,
+    Uint8List blob, {
+    required ObjectType type,
+    List<int> context = const [],
+  }) =>
+      _open(key, blob, type: type, context: context, formatVersion: Suite.legacyFormatVersion);
+
+  static Future<Uint8List> _open(
+    Uint8List key,
+    Uint8List blob, {
+    required ObjectType type,
+    required List<int> context,
+    required int formatVersion,
   }) async {
     _checkKey(key);
     if (blob.length < overhead) throw const SsbCryptoException('decrypt failed');
-    final header = Uint8List.sublistView(blob, 0, Suite.headerLength);
+    // Snapshot the whole blob: the header is checked here, but the nonce,
+    // ciphertext and tag views are read by the cipher after it has yielded,
+    // and a mid-flight change must not turn into a different (or merely
+    // inconsistent) result.
+    final b = Uint8List.fromList(blob);
+    final header = Uint8List.sublistView(b, 0, Suite.headerLength);
     if (!constantTimeEquals(header.sublist(0, 3), Suite.magic) ||
-        header[3] != Suite.formatVersion ||
+        header[3] != formatVersion ||
         !Suite.supported.contains(header[4]) ||
         header[5] != type.code) {
       throw const SsbCryptoException('decrypt failed');
     }
     final nonce = Uint8List.sublistView(
-        blob, Suite.headerLength, Suite.headerLength + nonceLength);
+        b, Suite.headerLength, Suite.headerLength + nonceLength);
     final ct = Uint8List.sublistView(
-        blob, Suite.headerLength + nonceLength, blob.length - tagLength);
-    final tag = Uint8List.sublistView(blob, blob.length - tagLength);
-    // Key snapshot for the same reason as in [seal]. The ciphertext is not
-    // copied: a caller mutating it mid-flight can only make authentication
-    // fail, never make it succeed on different bytes.
+        b, Suite.headerLength + nonceLength, b.length - tagLength);
+    final tag = Uint8List.sublistView(b, b.length - tagLength);
+    // Key snapshot for the same reason as in [seal].
     final k = Uint8List.fromList(key);
     final aad = concatBytes([header, context]);
     try {
