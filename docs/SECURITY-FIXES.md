@@ -4,6 +4,39 @@ Findings from the bug bounty (see `../SECURITY.md`) and from our own follow-up
 reviews, newest first. Each entry says what was wrong, what an attacker could
 do with it, and the commit that fixed it.
 
+## utf8Bytes was not injective -- a lone UTF-16 surrogate encoded identically to U+FFFD (Low)
+
+- **Found:** 2026-10-28, during an internal review of `Hpke.keySchedule`,
+  `OwnerToken.compute`, `utf8Bytes` and key-wrap AAD construction, prompted by
+  (but independent of) inbound reports naming the same four areas. Those
+  reports arrived as PoC zips/PDFs from unverified senders
+  (`wantiranti09@gmail.com`, `baiboe7282@gmail.com`) and the attachments were
+  not opened, so this finding may or may not be what they describe.
+- **What was wrong:** `utf8Bytes` encoded with `dart:convert`'s
+  `utf8.encode`, which silently replaces an unpaired UTF-16 surrogate with
+  U+FFFD instead of rejecting it. Two different Dart strings -- one holding
+  a lone surrogate (reachable via `String.fromCharCodes`), one holding a
+  literal U+FFFD at the same position -- therefore encoded to identical
+  bytes. Every domain-separation input in this package is built by
+  concatenating `utf8Bytes` output: vault id, tier and item/file id in
+  `vault.dart`, the vault id in `OwnerToken.compute`, the beneficiary id in
+  `SafetyNumber.fingerprint` (the key-substitution defense), and the
+  passphrase in `Unlock.deriveUnlockKey`. A non-injective encoder meant two
+  distinct ids, or two distinct passphrases, could in principle collide into
+  one AAD/MAC/KDF input -- the "confusing two different ... derived inputs
+  for one" class the bounty scope calls out. No concrete exploit was
+  demonstrated here: every id in the system today is server-issued and
+  opaque, and producing a lone surrogate needs `String.fromCharCodes`, not
+  normal text entry. The encoder itself was non-injective regardless.
+- **Fix:** `utf8Bytes` now throws `SsbCryptoException('invalid string')` on
+  an unpaired surrogate instead of silently mangling it, which makes the
+  encoding injective for every string it accepts. No behavior change for
+  well-formed strings. Regression test: `test/utf8_injective_test.dart`
+  (reproduces the `utf8.encode` collision directly, then shows `utf8Bytes`
+  refuses one side of it).
+- **Open:** the two inbound reports above still need Leon to review the PoC
+  attachments in a sandbox before any bounty determination.
+
 ## Reports reviewed and not accepted
 
 - **2026-10-19, Ibnu (Low): "Hpke.keySchedule omits psk_id_hash from the secret."**
