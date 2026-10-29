@@ -77,7 +77,33 @@ Uint8List u32be(int v) {
       [(v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff]);
 }
 
-Uint8List utf8Bytes(String s) => Uint8List.fromList(utf8.encode(s));
+/// Strict UTF-8 encoder: throws on an unpaired UTF-16 surrogate instead of
+/// silently substituting U+FFFD.
+///
+/// `dart:convert`'s `utf8.encode` is not injective over the full `String`
+/// space: a string holding a lone surrogate (reachable via
+/// `String.fromCharCodes`, not just a literal) encodes to the exact same
+/// bytes as a string holding a real U+FFFD character at that position. Every
+/// domain-separation context in this package (vault id, tier, item id, file
+/// id) is built by concatenating `utf8Bytes` output, so a non-injective
+/// encoder would let two different ids collide into one AAD/MAC input.
+/// Rejecting malformed strings up front makes the encoding injective, so
+/// distinct ids can never collide this way.
+Uint8List utf8Bytes(String s) {
+  for (var i = 0; i < s.length; i++) {
+    final unit = s.codeUnitAt(i);
+    if (unit >= 0xD800 && unit <= 0xDBFF) {
+      final next = i + 1 < s.length ? s.codeUnitAt(i + 1) : 0;
+      if (next < 0xDC00 || next > 0xDFFF) {
+        throw const SsbCryptoException('invalid string');
+      }
+      i++; // consumed the matching low surrogate
+    } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+      throw const SsbCryptoException('invalid string'); // unpaired low surrogate
+    }
+  }
+  return Uint8List.fromList(utf8.encode(s));
+}
 
 /// Strict hex decoder: whitespace is ignored, everything else must be an
 /// even number of `[0-9a-fA-F]` digits (no sign, no `0x`, no other radix
