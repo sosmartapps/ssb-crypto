@@ -39,6 +39,17 @@ do with it, and the change that fixed it.
 
 ## Reports reviewed and not accepted
 
+- **2026-10-31, hel (Low, hardening): "padmeLength() leaks exact plaintext length" and "openWithPassphrase() runs Argon2id twice on non-key failures."**
+  The first is not a vulnerability: Padmé is implemented as specified, and
+  lengths already on a bucket boundary map to their own bucket, so an observer
+  learns only the bucket, never the exact length. The second was real but is a
+  cost/DoS inefficiency, which SECURITY.md lists as out of scope, so it does not
+  qualify for a reward. We fixed it anyway: a failure after the key has
+  verified (`SsbPostUnlockException`) no longer triggers the legacy-form retry,
+  and Argon2id parameters read from a manifest now have a ceiling. Thank you to
+  hel for the report; credited as a participant. (No advisory number: this is
+  not a vulnerability.)
+
 - **2026-10-19, Ibnu (Low): "Hpke.keySchedule omits psk_id_hash from the secret."**
   Not a vulnerability and not a deviation. RFC 9180 section 5.1 puts
   `psk_id_hash` in the key-schedule *context*; the *secret* is
