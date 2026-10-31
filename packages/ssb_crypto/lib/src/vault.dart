@@ -274,6 +274,14 @@ class VaultKeyring {
     if (epoch == 0) throw const SsbCryptoException('bad epoch'); // 0 is reserved for v1 wraps
     final blob = await Aead.seal(kek, vaultKey,
         type: ObjectType.wrappedKey, context: vkContext(vaultId, slot, epoch));
+    // State is recorded after the await: a slower, older-epoch wrap must not
+    // overwrite the record of a newer one (that would lock the owner out of
+    // the slot with 'stale slot'; audit 2026-10-31). An in-flight wrap that
+    // outlives dispose() still returns its (correct) blob.
+    final recorded = slotEpochs[slot];
+    if (recorded != null && recorded > epoch) {
+      throw const SsbCryptoException('stale slot');
+    }
     slotEpochs[slot] = epoch;
     _slotHashes[slot] = hexEncode(sha256Of(blob));
     return blob;

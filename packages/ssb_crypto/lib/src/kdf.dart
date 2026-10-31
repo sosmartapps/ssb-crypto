@@ -67,6 +67,12 @@ class Argon2Params {
   static const maxIterations = 32;
   static const maxParallelism = 16;
 
+  /// Tighter ceilings enforced by [validateForUnlock] (stored params are
+  /// attacker-influenced). 512 MiB, t<=8, p<=4.
+  static const unlockMaxMemoryKiB = 512 * 1024;
+  static const unlockMaxIterations = 8;
+  static const unlockMaxParallelism = 4;
+
   /// Production default: 128 MiB, t=3, p=1 (calibrated per device at setup,
   /// never below [minimum]).
   static const production =
@@ -119,6 +125,14 @@ class Argon2Params {
   void validateForUnlock() {
     validate();
     if (_allowBelowMinimum) return;
+    // Ceiling for UNLOCK: these parameters are stored beside the vault, so a
+    // hostile or compromised server could otherwise hand a phone or browser
+    // tab 1 GiB x t=32 x p=16 and OOM or hang it (audit 2026-10-31). Four
+    // times production is far above anything calibration picks.
+    if (memoryKiB > unlockMaxMemoryKiB || iterations > unlockMaxIterations ||
+        parallelism > unlockMaxParallelism) {
+      throw const SsbCryptoException('argon2 parameters above maximum');
+    }
     if (memoryKiB < minimum.memoryKiB || iterations < minimum.iterations ||
         parallelism < minimum.parallelism) {
       throw const SsbCryptoException('argon2 parameters below minimum');
