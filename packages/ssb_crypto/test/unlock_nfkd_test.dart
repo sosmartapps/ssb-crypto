@@ -126,6 +126,35 @@ void main() {
       expect((await openAs(_composed, v)).vaultKey, v.vaultKey);
     });
 
+    test('a non-key failure (corrupt manifest) does not pay a second Argon2id', () async {
+      final v = await seal(_composed, legacy: false);
+      final bad = Uint8List.fromList(v.manifest)..[v.manifest.length - 1] ^= 1;
+      final tries = <int>[];
+      await expectLater(
+          Unlock.openWithPassphrase(
+            passphrase: _composed,
+            secretKey: _sk,
+            accountSalt: _salt,
+            params: Argon2Params.testOnly,
+            open: (k) {
+              tries.add(1);
+              return VaultKeyring.open(
+                  vaultId: v.vaultId, kek: k, slot: 'unlock', wrappedVaultKey: v.wrapped,
+                  slotEpochs: v.slotEpochs, manifestBlob: bad, wrappedTierKeys: v.tiers,
+                  items: const [], anchor: anchor);
+            },
+          ),
+          throwsA(isA<SsbCryptoException>()));
+      expect(tries.length, 1);
+    });
+
+    test('a wrong passphrase still tries the legacy form once (2 attempts)', () async {
+      final v = await seal(_composed);
+      final tries = <int>[];
+      await expectLater(openAs('café wrong', v, attempts: tries), throwsA(isA<SsbCryptoException>()));
+      expect(tries.length, 2);
+    });
+
     test('pre-normalization vault still opens via the raw fallback', () async {
       final v = await seal(_composed, legacy: true);
       final tries = <int>[];

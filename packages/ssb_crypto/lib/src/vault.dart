@@ -352,6 +352,11 @@ class VaultKeyring {
         throw const SsbCryptoException('stale slot');
       }
       return await _finishOpen(vaultId, vk, m, tiersSnap, itemsSnap, anchor);
+    } on SsbCryptoException catch (e) {
+      wipe(vk);
+      // The Vault Key unwrapped, so the unlock key was right: tell
+      // Unlock.openWithPassphrase not to retry the legacy derivation.
+      throw e is SsbPostUnlockException ? e : SsbPostUnlockException(e.message);
     } catch (_) {
       wipe(vk);
       rethrow;

@@ -102,9 +102,10 @@ abstract final class Unlock {
   ///
   /// Backward compatibility: vaults sealed before NFKD normalization were
   /// wrapped with a key derived from the raw passphrase. If [open] rejects
-  /// the normalized key with [SsbCryptoException] AND the passphrase has a
-  /// different raw form ([hasLegacyForm]), the legacy raw derivation is
-  /// tried once. ASCII / already-normalized passphrases never pay for a
+  /// the normalized key with [SsbCryptoException] (but not an
+  /// [SsbPostUnlockException], which means the key was right) AND the
+  /// passphrase has a different raw form ([hasLegacyForm]), the legacy raw
+  /// derivation is tried once. ASCII / already-normalized passphrases never pay for a
   /// second Argon2id. Each derived key is wiped after [open] returns, so
   /// [open] must not keep a reference to it.
   static Future<T> openWithPassphrase<T>({
@@ -126,6 +127,10 @@ abstract final class Unlock {
           accountSalt: salt, params: params);
       try {
         return await open(muk);
+      } on SsbPostUnlockException {
+        // The unlock key was accepted; the failure is elsewhere (corrupt
+        // manifest, stale slot...). A second Argon2id cannot help.
+        rethrow;
       } on SsbCryptoException {
         if (!hasLegacyForm(passphrase)) rethrow;
       } finally {

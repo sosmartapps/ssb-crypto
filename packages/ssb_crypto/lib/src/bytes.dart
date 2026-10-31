@@ -14,6 +14,15 @@ class SsbCryptoException implements Exception {
   String toString() => 'SsbCryptoException: $message';
 }
 
+/// An [SsbCryptoException] raised AFTER the unlock key was accepted (the
+/// Vault Key unwrapped fine) -- a corrupt manifest, a stale slot, a bad item
+/// list. The passphrase was right, so [Unlock.openWithPassphrase] never
+/// retries the legacy derivation on this (it would only burn a second
+/// Argon2id for nothing). Same generic message, so it is no new oracle.
+class SsbPostUnlockException extends SsbCryptoException {
+  const SsbPostUnlockException(super.message);
+}
+
 final Random _rng = Random.secure();
 
 /// Cryptographically secure random bytes from the OS CSPRNG.
