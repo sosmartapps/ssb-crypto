@@ -4,6 +4,27 @@ Findings from the bug bounty (see `../SECURITY.md`) and from our own follow-up
 reviews, newest first. Each entry says what was wrong, what an attacker could
 do with it, and the change that fixed it.
 
+## OwnerToken.compute had no minimum key length (Low)
+
+- **Reported:** 2026-10-27 by ATOSAN, one of three reports sent that day
+  (the other two are `utf8Bytes` below and a `Hpke.keySchedule` report we
+  have not yet been able to reproduce from the description alone -- see
+  `../SECURITY.md` follow-up notes).
+- **What was wrong:** `OwnerToken.compute` refused an empty or all-zero
+  `vaultKey` but, unlike the otherwise-identical `ClaimToken.compute`, did
+  not enforce a minimum length. A 1-byte non-zero `vaultKey` was accepted
+  and hashed into the owner token exactly like a real 32-byte Vault Key,
+  so a caller that passed a short key got a low-entropy, brute-forceable
+  token instead of an error.
+- **What an attacker could do:** nothing without already controlling the
+  caller -- every real Vault Key in the system is 32 random bytes, so this
+  was a missing guard rather than a reachable exploit. It is the same class
+  of problem `ClaimToken.minKeyLength` already existed to prevent.
+- **Fix:** added `OwnerToken.minKeyLength = 32`, checked the same way
+  `ClaimToken.compute` checks it. No behavior change for real (32-byte)
+  Vault Keys. Regression tests: `test/claim_test.dart` (`a short vault key
+  is refused...`, `an all-zero vault key is refused regardless of length`).
+
 ## utf8Bytes was not injective -- a lone UTF-16 surrogate encoded identically to U+FFFD (Low)
 
 - **Found:** 2026-10-28, during an internal review of `Hpke.keySchedule`,
