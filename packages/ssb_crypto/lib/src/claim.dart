@@ -68,14 +68,22 @@ abstract final class ClaimToken {
 abstract final class OwnerToken {
   static const _context = 'ssb/v1/owner';
 
-  /// An empty or all-zero [vaultKey] is a disposed keyring, not an owner;
-  /// it is refused with [SsbCryptoException] rather than turned into a
-  /// constant, guessable token (red team 2026-10-20, B6).
+  /// Minimum accepted vault-key length (the real key is the 32-byte Vault
+  /// Key), matching [ClaimToken.minKeyLength].
+  static const minKeyLength = 32;
+
+  /// A [vaultKey] shorter than [minKeyLength] or all-zero is not a real
+  /// Vault Key -- a short key makes the resulting hash low-entropy and
+  /// brute-forceable, and an all-zero key is a disposed keyring, not an
+  /// owner. Both are refused with [SsbCryptoException] rather than turned
+  /// into a guessable token (red team 2026-10-20, B6; the length floor was
+  /// missing here even though [ClaimToken.compute] already enforced it --
+  /// reported 2026-10-27 by ATOSAN).
   static Future<String> compute({
     required String vaultId,
     required Uint8List vaultKey,
   }) async {
-    if (vaultKey.isEmpty || isAllZero(vaultKey)) {
+    if (vaultKey.length < minKeyLength || isAllZero(vaultKey)) {
       throw const SsbCryptoException('bad owner key');
     }
     final v = utf8Bytes(vaultId);

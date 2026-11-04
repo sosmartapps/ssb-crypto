@@ -58,4 +58,21 @@ void main() {
     expect(await OwnerToken.compute(vaultId: 'v2', vaultKey: vaultKey), isNot(t));
     expect(await OwnerToken.verifier(t), isNot(t));
   });
+
+  test('a short vault key is refused, not hashed into a low-entropy token', () async {
+    for (final len in [0, 1, 4, 16, 31]) {
+      expect(
+          () async => await OwnerToken.compute(vaultId: 'v1', vaultKey: randomBytes(len)),
+          throwsA(isA<SsbCryptoException>()));
+    }
+    // 32 bytes (the real Vault Key length) is accepted.
+    await OwnerToken.compute(vaultId: 'v1', vaultKey: randomBytes(32));
+  });
+
+  test('an all-zero vault key is refused regardless of length', () async {
+    expect(
+        () async =>
+            await OwnerToken.compute(vaultId: 'v1', vaultKey: Uint8List(32)),
+        throwsA(isA<SsbCryptoException>()));
+  });
 }
