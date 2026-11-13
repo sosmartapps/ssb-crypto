@@ -90,6 +90,10 @@ abstract final class Hpke {
   /// RFC 9180 §5.1 KeySchedule, mode_base (no PSK). Public for test vectors.
   static Future<HpkeKeySchedule> keySchedule(List<int> sharedSecret, List<int> info,
       {required int kemId, required int kdfId, required int aeadId}) async {
+    // HMAC zero-pads a short key, so `[1]` and `[1, 0, 0, 0]` would extract the
+    // same secret. Every KEM this package uses (X-Wing, X25519) yields exactly
+    // 32 bytes; refusing any other length keeps the extract injective.
+    if (sharedSecret.length != 32) throw const SsbCryptoException('bad shared secret length');
     final suiteId = concatBytes([utf8Bytes('HPKE'), u16be(kemId), u16be(kdfId), u16be(aeadId)]);
     // Snapshot both caller buffers before the first await (see Aead.seal).
     // `info` is read at the second await and `sharedSecret` at the third;

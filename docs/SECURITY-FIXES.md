@@ -6,7 +6,9 @@ do with it, and the change that fixed it.
 
 ## SSB-2026-002 follow-up — a same-seq manifest from a sibling device or a replaying server was accepted (CVSS 7.1 claimed)
 
-- **Reported:** 2026-11-12 by shushmanmisha, as two parts: an equal-seq fork
+- **Reported:** first on 2026-10-27 by Ibnu (the equal-seq fork, with a working
+  test against `c5779e8`; his PoC fails on the fixed code, verified 2026-11-13),
+  then on 2026-11-12 by shushmanmisha, as two parts: the same equal-seq fork
   and a "crash window" the reporter believed left the same gap open. Against
   this repository, both parts matched the SSB-2026-002 code (`vault.dart`
   lines 430-433, strict `<`).
@@ -68,7 +70,7 @@ do with it, and the change that fixed it.
 
 ## utf8Bytes was not injective -- a lone UTF-16 surrogate encoded identically to U+FFFD (Low)
 
-- **Found:** 2026-10-28, during an internal review of `Hpke.keySchedule`,
+- **Reported:** 2026-10-27 by ATOSAN (PoCs run 2026-11-13: both `utf8Bytes` PoCs reproduce at `756e09f`, including the legacy v1 path, and are refused at `a018a86` and later). **Also found** 2026-10-28, during an internal review of `Hpke.keySchedule`,
   `OwnerToken.compute`, `utf8Bytes` and key-wrap AAD construction, prompted by
   (but independent of) inbound reports naming the same four areas. Those
   reports arrived as PoC zips/PDFs from unverified senders
@@ -96,8 +98,13 @@ do with it, and the change that fixed it.
   well-formed strings. Regression test: `test/utf8_injective_test.dart`
   (reproduces the `utf8.encode` collision directly, then shows `utf8Bytes`
   refuses one side of it).
-- **Open:** the two inbound reports above still need Leon to review the PoC
-  attachments in a sandbox before any bounty determination.
+- **Related ATOSAN report, not a vulnerability:** `Hpke.keySchedule` gave the
+  same schedule for shared secrets that differ only in trailing zeros. The
+  `suiteId` half was already fixed by the range-checked encoders in `c5779e8`.
+  The shared-secret half is HMAC's zero-padding of short keys, as in RFC 9180,
+  and every KEM here returns exactly 32 bytes, so it was unreachable.
+  `Hpke.keySchedule` now refuses any other length anyway
+  (`test/hpke_shared_secret_length_test.dart`).
 
 ## Reports reviewed and not accepted
 
