@@ -4,7 +4,7 @@ The cryptographic core of **So Smart Beneficiary**, a zero-knowledge "digital le
 
 > **Status: NOT independently audited.** This is a request for public review before any real customer data is stored. Do not rely on this code for anything you cannot afford to lose.
 
-**Bounty:** $100 per valid vulnerability. See [SECURITY.md](SECURITY.md) for scope, rules and limits.
+**Bounty:** closed as of 2026-11-13 (all 5 rewards allocated); reports are still welcome and credited. See [SECURITY.md](SECURITY.md).
 
 ## What is in here
 | Path | What |
@@ -32,7 +32,7 @@ See `docs/SECURITY-FIXES.md` for every finding and what changed: SSB-2026-001 (i
 
 ## Known limitations (so you do not spend time on them)
 - The crypto is pure Dart today. It is not constant-time and secrets cannot be reliably wiped from memory. Native and hardware-backed primitives are planned.
-- The server (Firebase) code is not part of this repository, and server hardening is still in progress; the bounty covers this package only.
+- The server (Firebase) code is not part of this repository, and server hardening is still in progress; the bounty (now closed) covered this package only.
 - Freshness is anchored per device: on the web the anchor is in `localStorage` and can be cleared, and a device that has never seen a vault cannot detect a same-epoch rollback until an owner-signed manifest head exists (planned).
 - Files are not yet bound into the manifest (the app stores none today); older versions of the same file id would still open at the same epoch.
 - The Argon2id parameters stored beside a vault are not authenticated by the manifest; a hostile server can raise the cost (denial of service) or lower it only to the enforced floor.

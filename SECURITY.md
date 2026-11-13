@@ -1,14 +1,16 @@
 # Security policy and bug bounty
 
-So Smart Beneficiary protects information people want to survive them, so we want flaws found before real data goes in. **This code is not independently audited.** A reward is offered for real findings.
+So Smart Beneficiary protects information people want to survive them, so we want flaws found before real data goes in. **This code is not independently audited.** **The reward program is closed (see Reward below); reports are still welcome.**
 
 ## How to report
 Email **leon@sosmartapps.app** with the subject "SSB security report". Please do not open a public issue for a vulnerability. Include what is wrong, the file and line, and a failing test, script or clear step-by-step proof. We acknowledge within 5 business days.
 
 ## Reward
-- **$100 (USD) per valid, previously unreported vulnerability** in scope.
+**Status: closed as of 2026-11-13.** All 5 rewards ($500) have been allocated. Reports are still welcome and are credited in the fix notes, but no new rewards are paid. We may reopen the program if we announce more funding; any reopening will be announced here. Reports we received before this date are judged under the terms below.
+
+- While the program was open: **$100 (USD) per valid, previously unreported vulnerability** in scope.
 - One reward per root cause. If several reports share a cause, the first complete report gets it.
-- **Program cap: 5 rewards ($500 total)** until we announce more funding. Reports after the cap are still welcome and credited, but unpaid.
+- **Program cap: 5 rewards ($500 total)**, now reached. Reports after the cap are still welcome and credited, but unpaid.
 - We decide validity, and we pay by a method we agree with you by email. Rewards are discretionary; this page is not a contract. We may change or end the program, but a report already received is judged under the terms in force when we received it.
 
 ## In scope
