@@ -4,6 +4,47 @@ Findings from the bug bounty (see `../SECURITY.md`) and from our own follow-up
 reviews, newest first. Each entry says what was wrong, what an attacker could
 do with it, and the change that fixed it.
 
+## SSB-2026-002 follow-up — a same-seq manifest from a sibling device or a replaying server was accepted (CVSS 7.1 claimed)
+
+- **Reported:** 2026-11-12 by shushmanmisha, as two parts: an equal-seq fork
+  and a "crash window" the reporter believed left the same gap open. Against
+  this repository, both parts matched the SSB-2026-002 code (`vault.dart`
+  lines 430-433, strict `<`).
+- **What was wrong (the fork half, real):** `VaultKeyring._finishOpen` only
+  refused a manifest whose `seq` was *less than* the device anchor. `seq` is
+  per keyring, so two devices that both wrote from the same prior state (or a
+  server replaying a sibling write) can legitimately produce two different
+  manifests carrying the *same* `seq`. The old check let either one through
+  at that seq, which could silently roll the vault back to pre-revocation
+  state as long as the replayed manifest's `seq` was not strictly behind.
+- **What an attacker could do:** a malicious or compromised server (the same
+  threat model as the rest of SSB-2026-002) could hand back an older sibling
+  manifest at the current seq and have it accepted as fresh, re-admitting a
+  revoked tier key or beneficiary.
+- **Fix:** the anchor now stores `seq` plus the hex SHA-256 of the manifest
+  blob (`FreshnessAnchor.lastHash` / `commitHead`). At an equal seq with a
+  recorded, different hash, open now fails with `manifest fork`. A seq-only
+  (pre-fix) anchor has no hash to compare, so it is accepted once more and
+  upgraded to carry the hash on that open -- a one-time transition window,
+  not an ongoing one. Regression tests: `test/anchor_equal_seq_fork_test.dart`,
+  plus updated cases in `test/old_manifest_refused_test.dart`.
+- **The "crash window" half: reviewed, not a distinct vulnerability.** The
+  app writes the vault file, then separately commits the anchor (design D7);
+  a crash in between leaves the anchor one step behind. That gap was always
+  intentional and is exactly what lets a device recover after a real crash:
+  the next open sees `seq > anchor` and advances, it never goes backwards.
+  The hash binding above closes the one case that gap could be abused for
+  (a same-seq replay); it does not reopen a lower-seq rollback, which was
+  already refused before this report. Regression test (already green against
+  both the old and new anchor format): `test/old_manifest_refused_test.dart`
+  "a crash between write and commit is healed by the next open (seq > anchor
+  commits)"; the new hash-aware version is `test/anchor_equal_seq_fork_test.dart`
+  "crash window: write done, commit lost -> next open accepts the newer seq
+  and commits it".
+- **Open:** reward determination (program cap, see `../SECURITY.md`) and the
+  reply to the reporter are pending Leon's review. Thank you to shushmanmisha
+  for the report.
+
 ## OwnerToken.compute had no minimum key length (Low)
 
 - **Reported:** 2026-10-27 by ATOSAN, one of three reports sent that day

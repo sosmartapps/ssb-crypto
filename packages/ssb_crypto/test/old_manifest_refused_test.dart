@@ -51,7 +51,8 @@ void main() {
       r3b.dispose();
       expect(await behind.lastSeq('v'), 3, reason: 'newer seq commits');
       expect(await outcome(() => s2.open(kek: kek, anchor: behind)), 'SSB:stale manifest');
-      expect(behind.commits, [('v', 2), ('v', 3)]);
+      // (v,2) twice: the second is the seq-only anchor being upgraded with the manifest hash.
+      expect(behind.commits, [('v', 2), ('v', 2), ('v', 3)]);
     });
 
     test('the biometric path (fromVaultKey) enforces the same rule', () async {

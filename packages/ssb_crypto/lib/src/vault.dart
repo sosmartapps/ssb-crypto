@@ -64,6 +64,10 @@ class VaultKeyring {
   String _itemsHash;
   String _beneficiarySetHash;
   int _seq;
+  // Seq and manifest-blob hash of the newest sealed/opened manifest, for
+  // [commitManifest]. Overlapping seals keep the highest seq.
+  int _headSeq = -1;
+  String? _headHash;
   bool _disposed = false;
 
   VaultKeyring._({
@@ -359,7 +363,7 @@ class VaultKeyring {
           m.slotHashes[slot] != hexEncode(sha256Of(wvk))) {
         throw const SsbCryptoException('stale slot');
       }
-      return await _finishOpen(vaultId, vk, m, tiersSnap, itemsSnap, anchor);
+      return await _finishOpen(vaultId, vk, m, mblob, tiersSnap, itemsSnap, anchor);
     } on SsbCryptoException catch (e) {
       wipe(vk);
       // The Vault Key unwrapped, so the unlock key was right: tell
@@ -395,12 +399,13 @@ class VaultKeyring {
     _checkVaultKey(vaultKey);
     _requireAllTiers(wrappedTierKeys);
     final vk = Uint8List.fromList(vaultKey);
+    final mblob = Uint8List.fromList(manifestBlob);
     // The tier map and item list are read after the first await (see open).
     final tiersSnap = _snapshotTiers(wrappedTierKeys);
     final itemsSnap = _snapshotItems(items);
     try {
-      final m = await VaultManifest.open(vk, manifestBlob, vaultId: vaultId);
-      return await _finishOpen(vaultId, vk, m, tiersSnap, itemsSnap, anchor);
+      final m = await VaultManifest.open(vk, mblob, vaultId: vaultId);
+      return await _finishOpen(vaultId, vk, m, mblob, tiersSnap, itemsSnap, anchor);
     } catch (_) {
       wipe(vk);
       rethrow;
@@ -423,13 +428,30 @@ class VaultKeyring {
     String vaultId,
     Uint8List vk,
     VaultManifest m,
+    Uint8List manifestBlob,
     Map<Tier, Uint8List> wrappedTierKeys,
     List<SealedItem> items,
     FreshnessAnchor anchor,
   ) async {
     final last = await anchor.lastSeq(vaultId);
+    final mHash = hexEncode(sha256Of(manifestBlob));
     if (last != null && m.seq < last) {
       throw const SsbCryptoException('stale manifest');
+    }
+    // `seq` is per keyring, so an EQUAL seq is not proof of freshness: two
+    // devices that both wrote from seq N-1, or a server replaying a sibling
+    // write, yield different manifests at the same seq (SSB-2026-002 follow-up).
+    // Once this device has recorded the hash of its head, only that exact
+    // manifest is accepted at that seq. A seq-only (legacy) anchor has no hash
+    // to compare; it is accepted and upgraded below.
+    var needsCommit = last == null || m.seq > last;
+    if (!needsCommit) {
+      final lastHash = await anchor.lastHash(vaultId);
+      if (lastHash == null) {
+        needsCommit = true; // legacy seq-only anchor: upgrade it below
+      } else if (lastHash != mHash) {
+        throw const SsbCryptoException('manifest fork');
+      }
     }
     final tks = <Tier, Uint8List>{};
     try {
@@ -447,7 +469,8 @@ class VaultKeyring {
     }
     // Everything checked out: this is now the oldest state this device will
     // accept. (A missing anchor is accepted and reported, design D7.)
-    if (last == null || m.seq > last) await anchor.commit(vaultId, m.seq);
+    // Also upgrades a seq-only anchor (equal seq, no hash yet) to carry the hash.
+    if (needsCommit) await anchor.commitHead(vaultId, m.seq, mHash);
     return VaultKeyring._(
       vaultId: vaultId,
       vaultKey: vk,
@@ -462,7 +485,7 @@ class VaultKeyring {
       beneficiarySetHash: m.beneficiarySetHash,
       seq: m.seq,
       restoredWithoutAnchor: last == null,
-    );
+    ).._setHead(m.seq, mHash);
   }
 
   // ---- manifest ----------------------------------------------------------
@@ -482,16 +505,35 @@ class VaultKeyring {
     _checkLive();
     if (_seq >= VaultManifest.maxU32) throw const SsbCryptoException('manifest sequence exhausted');
     _seq += 1;
+    final sealedSeq = _seq;
     _itemsHash = VaultManifest.itemsHashHex(items);
     if (beneficiaryEntries != null) {
       _beneficiarySetHash = VaultManifest.beneficiarySetHashHex(beneficiaryEntries);
     }
-    return VaultManifest.seal(vaultKey, manifest);
+    return VaultManifest.seal(vaultKey, manifest).then((blob) {
+      _setHead(sealedSeq, hexEncode(sha256Of(blob)));
+      return blob;
+    });
+  }
+
+  void _setHead(int seq, String hash) {
+    if (seq >= _headSeq) {
+      _headSeq = seq;
+      _headHash = hash;
+    }
   }
 
   /// Records the current manifest sequence in the device [anchor]. Call it
   /// AFTER the file holding that manifest has been written (design D7).
-  Future<void> commitManifest() => anchor.commit(vaultId, _seq);
+  ///
+  /// Commits the seq together with the hash of the sealed manifest blob so
+  /// the anchor can tell this write from a sibling at the same seq.
+  Future<void> commitManifest() {
+    final h = _headHash;
+    return (h != null && _headSeq == _seq)
+        ? anchor.commitHead(vaultId, _seq, h)
+        : anchor.commit(vaultId, _seq);
+  }
 
   // ---- tier exports ------------------------------------------------------
 

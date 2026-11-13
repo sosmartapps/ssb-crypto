@@ -245,8 +245,12 @@ const noBufferParams = <String>{
   'VaultKeyring.commitManifest', // no arguments
   'FreshnessAnchor.lastSeq', // String
   'FreshnessAnchor.commit', // String, int
+  'FreshnessAnchor.lastHash', // String
+  'FreshnessAnchor.commitHead', // String, int, String (hash)
   'InMemoryAnchor.lastSeq', // String
   'InMemoryAnchor.commit', // String, int
+  'InMemoryAnchor.lastHash', // String
+  'InMemoryAnchor.commitHead', // String, int, String (hash)
 };
 
 void main() {

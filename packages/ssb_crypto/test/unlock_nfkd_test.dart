@@ -74,7 +74,10 @@ void main() {
 
     /// Seals a fresh keyring's Vault Key under [p]; returns an opener.
     /// (VaultKeyring.open requires every tier's wrapped key -- Phase 0, B2.)
-    final anchor = InMemoryAnchor();
+    // Fresh anchor per test: each seal() makes a NEW vault under the same id,
+    // and the anchor now (correctly) refuses a different manifest at an equal seq.
+    late InMemoryAnchor anchor;
+    setUp(() => anchor = InMemoryAnchor());
     Future<({String vaultId, Uint8List wrapped, Map<String, int> slotEpochs, Uint8List manifest,
         Map<Tier, Uint8List> tiers, Uint8List vaultKey})> seal(
         String p, {bool legacy = false}) async {
