@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 
 import 'bytes.dart';
+import 'ed25519_key_check.dart';
 import 'pq/pq.dart';
 
 /// Hybrid signatures: **Ed25519 + ML-DSA-65** (spec §6.2).
@@ -81,10 +82,26 @@ abstract final class HybridSignature {
     }
   }
 
+  /// Rejects a hybrid public key whose Ed25519 half is not a canonical,
+  /// non-identity, prime-order point, with [SsbCryptoException]. Call it when
+  /// a key is enrolled; [verify] also returns false for such a key.
+  static void validatePublicKey(Uint8List publicKey) {
+    if (publicKey.length != publicKeyLength ||
+        !Ed25519KeyCheck.isValidPublicKey(Uint8List.sublistView(publicKey, 0, edPkLen))) {
+      throw const SsbCryptoException('bad public key');
+    }
+  }
+
   /// Verifies BOTH signatures. A forgery of either algorithm alone fails.
   static Future<bool> verify(Uint8List publicKey, Uint8List message, Uint8List signature,
       {required String purpose}) async {
     if (publicKey.length != publicKeyLength || signature.length != signatureLength) {
+      return false;
+    }
+    // A key from outside must have a genuine prime-order Ed25519 half: for a
+    // small-order or torsion key the Ed25519 leg is forgeable with no secret
+    // (hrydarie, 2026-11-03). Keys from generateKeyPair always pass.
+    if (!Ed25519KeyCheck.isValidPublicKey(Uint8List.sublistView(publicKey, 0, edPkLen))) {
       return false;
     }
     final m = _domain(purpose, message);

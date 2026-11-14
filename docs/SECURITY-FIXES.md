@@ -4,6 +4,36 @@ Findings from the bug bounty (see `../SECURITY.md`) and from our own follow-up
 reviews, newest first. Each entry says what was wrong, what an attacker could
 do with it, and the change that fixed it.
 
+## Ed25519 public keys were not checked for small order (Low, hardening)
+
+- **Reported:** 2026-11-03 by hrydarie (report "SSB security report", reproduced
+  against `d786bbb`; follow-up 2026-11-10). Thank you to hrydarie for a
+  careful report with a working test battery.
+- **What was wrong:** `HybridSignature.verify` and `OwnerIdentity.verifyChallenge`
+  handed the Ed25519 public key to `package:cryptography` without checking it.
+  That verifier checks the signature encoding but not the key, so a key whose
+  Ed25519 half is a small-order point (the identity, or a point of order 2, 4
+  or 8) lets anyone forge the Ed25519 half with no secret: for the identity
+  point the pair `(R = B, S = 1)` verifies for every message. For a hybrid key
+  enrolled that way the classical half of the hybrid adds no security and the
+  signature rests on ML-DSA-65 alone.
+- **Bounds:** keys from `HybridSignature.generateKeyPair` and
+  `OwnerIdentity.derive` are scalar multiples of the base point, so they are
+  never affected, and a forgery cannot be made for an honest key. The gap only
+  opens for a key supplied from outside, whose enrolling party also holds the
+  ML-DSA secret for it. No reward: the program cap had been reached by earlier
+  reports (see `../SECURITY.md`), and the report is credited here.
+- **Fix:** new `Ed25519KeyCheck.isValidPublicKey` (`lib/src/ed25519_key_check.dart`)
+  accepts only a canonical encoding of a curve point that is not the identity
+  and has order exactly L (`[L]A` is the identity), which also rejects any key
+  with a torsion component. `HybridSignature.verify` and
+  `OwnerIdentity.verifyChallenge` return false for any other key, and the new
+  `HybridSignature.validatePublicKey` throws `SsbCryptoException` so a caller can
+  refuse such a key when it is enrolled. Regression tests:
+  `test/ed25519_small_order_key_test.dart` (the identity, order-2 and
+  owner-challenge forgeries pass before the fix and are refused after it;
+  100 random honest keys and honest signatures still verify).
+
 ## SSB-2026-002 follow-up — a same-seq manifest from a sibling device or a replaying server was accepted (CVSS 7.1 claimed)
 
 - **Reported:** first on 2026-10-27 by Ibnu (the equal-seq fork, with a working

@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 
 import 'bytes.dart';
+import 'ed25519_key_check.dart';
 import 'kdf.dart';
 
 /// The owner's self-certifying identity (docs/CRYPTO-DESIGN.md, SSB-2026-003).
@@ -127,6 +128,9 @@ class OwnerIdentity {
     String purpose = authPurpose,
   }) async {
     if (publicKey.length != 32 || signature.length != 64) return false;
+    // Small-order and torsion keys make the Ed25519 check forgeable with no
+    // secret (hrydarie, 2026-11-03); keys derived from a Vault Key never are.
+    if (!Ed25519KeyCheck.isValidPublicKey(publicKey)) return false;
     if (nonce.length < nonceMin || nonce.length > nonceMax) return false;
     if (vaultIdFor(publicKey) != vaultId) return false;
     // Snapshot the key and signature: the verifier may read them after it
